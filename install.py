@@ -7,7 +7,7 @@ import time
 TIOCSCTTY = 0x540E
 
 
-def subprocess(*cmd):
+def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
 	mfd, sfd = os.openpty()
 	pid = os.fork()
 
@@ -28,6 +28,15 @@ def subprocess(*cmd):
 		os.execv(list(cmd)[0], list(cmd))
 
 	os.close(sfd)
+
+	if in_delay:
+		os.write(0, b"in_delay\n")
+		time.sleep(in_delay)
+
+	for i in inputs:
+		os.write(mfd, i.encode("utf-8"))
+		time.sleep(in_interval)
+
 	return pid, mfd
 
 
@@ -56,8 +65,13 @@ def read(rfd, timeout=1):
 	return total_read_bytes.decode("utf-8")
 
 
-def subprocess_output(*cmd, timeout=1):
-	pid, rwfd = subprocess(*cmd)
+def subprocess_output(*cmd, timeout=1, inputs=[], in_delay=0, in_interval=0):
+	pid, rwfd = subprocess(
+		*cmd,
+		inputs=inputs,
+		in_delay=in_delay,
+		in_interval=in_interval
+	)
 	result = read(rwfd, timeout)
 	print(result)
 	os.close(rwfd)
@@ -76,7 +90,7 @@ def check_inet():
 	)
 	
 	if ret_code != 0:
-		os.write(1, f"error no inet\n".encode("utf-8"))
+		os.write(2, f"error no inet\n".encode("utf-8"))
 		exit(1)
 
 
@@ -85,7 +99,9 @@ def check_uefi():
 		"/usr/bin/cat",
 		"/sys/firmware/efi/fw_platform_size"
 	)
-	return ret_code == 0
+	if ret_code != 0:
+		os.write(2, f"error not a uefi system\n".encode("utf-8"))
+		exit(1)
 
 
 def get_input(prompt):
@@ -108,7 +124,7 @@ def select_device():
 	_, result = subprocess_output("/usr/bin/fdisk", "-l")
 
 	while True:
-		device = get_input(f"Select device to partion:")
+		device = get_input(f"Select device to partition:")
 
 		if device in result:
 			break
@@ -120,29 +136,7 @@ def select_device():
 
 def configure():
 	config = {}
-	config["is_uefi"] = check_uefi()
 	config["device"] = select_device()
-
-	config["partitions"] = [
-		b"label: gpt\n",
-		b"size=1GiB, type=uefi\n",
-		b"size=4GiB, type=swap\n",
-		b"type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709\n"
-	] if config["is_uefi"] else [
-		b"label: dos\n",
-		b"size=4GiB, type=82\n",
-		b"type=83, bootable\n"
-	]
-
-	config["partition_formats"] = [
-		["/usr/bin/mkfs.fat", "-F", "32"],
-		["/usr/bin/mkswap"],
-		["/usr/bin/mkfs.ext4"]
-	] if config["is_uefi"] else [
-		["/usr/bin/mkswap"],
-		["/usr/bin/mkfs.ext4"]
-	]
-
 	config["packages"] = [
 		"base",
 		"linux",
@@ -156,42 +150,45 @@ def configure():
 	return config
 
 
-def partition(config):
-	pid, rwfd = subprocess(
+def partition(device):
+	# Ctrl-D \x04 to signal finished and y to write
+	partitions = [
+		"label: gpt\n",
+		"size=1GiB, type=uefi\n",
+		"size=4GiB, type=swap\n",
+		"type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709\n",
+		"\x04",
+		"y\n"
+	]
+	ret_code, _ = subprocess_output(
 		"/usr/bin/sfdisk",
 		"--wipe-partitions",
 		"always",
-		config["device"]
+		device,
+		timeout=1,
+		inputs=partitions,
+		in_delay=1,
+		in_interval=1
 	)
-	result = read(rwfd, timeout=3)
-	print(result)
-	
-	for part in config["partitions"]:
-		os.write(rwfd, part)
-
-	# Tell sfdisk that we're finished entering the script.
-	os.write(rwfd, b"\x04") # Ctrl-D
-	os.write(rwfd, b"y\n")
-	result = read(rwfd, timeout=5)
-	print(result)
-	os.close(rwfd)
-	_, status = os.waitpid(pid, 0)
-	ret_code = os.waitstatus_to_exitcode(status)
 
 	if ret_code != 0:
 		exit(1)
 
 	_, result = subprocess_output(
 		"/usr/bin/lsblk",
-		f"{config["device"]}",
+		device,
 		"-o",
 		"NAME"
 	)
 	partitions = [f"/dev/{line[2:]}" for line in result.splitlines()[3:]]
 	time.sleep(5)
+	cmds = [
+		["/usr/bin/mkfs.fat", "-F", "32", partitions[0]],
+		["/usr/bin/mkswap", partitions[1]],
+		["/usr/bin/mkfs.ext4", partitions[2]]
+	]
 
-	for cmd, part in zip(config["partition_formats"], partitions):
-		cmd += [part]
+	for cmd in cmds:
 		ret_code, _ = subprocess_output(*cmd)
 		if ret_code != 0:
 			exit(1)
@@ -199,32 +196,16 @@ def partition(config):
 	return partitions
 
 
-def mount_partitions(config, partitions):
+def mount_partitions(partitions):
 	partitions.reverse()
-	ret_code, _ = subprocess_output(
-		"/usr/bin/mount",
-		partitions[0],
-		"/mnt"
-	)
+	cmds = [
+		["/usr/bin/mount", partitions[0], "/mnt"],
+		["/usr/bin/swapon", partitions[1]],
+		["/usr/bin/mount", "--mkdir", partitions[2], "/mnt/boot"]
+	]
 
-	if ret_code != 0:
-		exit(1)
-
-	ret_code, _ = subprocess_output(
-		"/usr/bin/swapon",
-		partitions[1]
-	)
-
-	if ret_code != 0:
-		exit(1)
-
-	if config["is_uefi"]:
-		ret_code, _ = subprocess_output(
-			"/usr/bin/mount",
-			"--mkdir",
-			partitions[2],
-			"/mnt/boot"
-		)
+	for cmd in cmds:
+		ret_code, _ = subprocess_output(*cmd)
 
 		if ret_code != 0:
 			exit(1)
@@ -232,10 +213,11 @@ def mount_partitions(config, partitions):
 
 def do_install():
 	check_inet()
+	check_uefi()
 	config = configure()
 	print(config)
-	partitions = partition(config)
-	mount_partitions(config, partitions)
+	partitions = partition(config["device"])
+	mount_partitions(partitions)
 
 
 if __name__ == "__main__":
