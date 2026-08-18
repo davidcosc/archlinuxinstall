@@ -26,8 +26,6 @@ def subprocess(*cmd):
 		pretty_cmd = f"root@archiso ~ # {" ".join(list(cmd))}"
 		os.write(0, f"{pretty_cmd}\n".encode("utf-8"))
 		os.execv(list(cmd)[0], list(cmd))
-		os.write(0, f"error exec\n".encode("utf-8"))
-		exit(1)
 
 	os.close(sfd)
 	return pid, mfd
@@ -82,33 +80,12 @@ def check_inet():
 		exit(1)
 
 
-def is_uefi():
+def check_uefi():
 	ret_code, _ = subprocess_output(
 		"/usr/bin/cat",
 		"/sys/firmware/efi/fw_platform_size"
 	)
 	return ret_code == 0
-
-
-
-def is_vm():
-	ret_code, _ = subprocess_output("/usr/bin/systemd-detect-virt")
-	return ret_code == 0
-
-
-def determine_additional_cpu_packages():
-	_, result = subprocess_output(
-		"/usr/bin/cat",
-		"/proc/cpuinfo"
-	)
-
-	if "GenuineIntel" in result:
-		return ["intel-ucode"]
-
-	if "AuthenticAMD" in result:
-		return ["amd-ucode"]
-
-	return []
 
 
 def get_input(prompt):
@@ -141,42 +118,56 @@ def select_device():
 	return device
 
 
-def partition(uefi=False):
-	if uefi:
-		part_configs = [
-			b"label: gpt\n",
-			b"size=1GiB, type=uefi\n",
-			b"size=4GiB, type=swap\n",
-			b"type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709\n"
-		]
-		format_cmds = [
-			["/usr/bin/mkfs.fat", "-F", "32"],
-			["/usr/bin/mkswap"],
-			["/usr/bin/mkfs.ext4"]
-		]
-	else:
-		part_configs = [
-			b"label: dos\n",
-			b"size=4GiB, type=82\n",
-			b"type=83, bootable\n"
-		]
-		format_cmds = [
-			["/usr/bin/mkswap"],
-			["/usr/bin/mkfs.ext4"]
-		]
+def configure():
+	config = {}
+	config["is_uefi"] = check_uefi()
+	config["device"] = select_device()
 
-	device = select_device()
+	config["partitions"] = [
+		b"label: gpt\n",
+		b"size=1GiB, type=uefi\n",
+		b"size=4GiB, type=swap\n",
+		b"type=4f68bce3-e8cd-4db1-96e7-fbcaf984b709\n"
+	] if config["is_uefi"] else [
+		b"label: dos\n",
+		b"size=4GiB, type=82\n",
+		b"type=83, bootable\n"
+	]
+
+	config["partition_formats"] = [
+		["/usr/bin/mkfs.fat", "-F", "32"],
+		["/usr/bin/mkswap"],
+		["/usr/bin/mkfs.ext4"]
+	] if config["is_uefi"] else [
+		["/usr/bin/mkswap"],
+		["/usr/bin/mkfs.ext4"]
+	]
+
+	config["packages"] = [
+		"base",
+		"linux",
+		"linux-firmware",
+		"linux-firmware-marvell",
+		"linux-headers",
+		"wireless-regdb",
+		"intel-ucode",
+		"amd-ucode"
+	]
+	return config
+
+
+def partition(config):
 	pid, rwfd = subprocess(
 		"/usr/bin/sfdisk",
 		"--wipe-partitions",
 		"always",
-		device
+		config["device"]
 	)
 	result = read(rwfd, timeout=3)
 	print(result)
 	
-	for config in part_configs:
-		os.write(rwfd, config)
+	for part in config["partitions"]:
+		os.write(rwfd, part)
 
 	# Tell sfdisk that we're finished entering the script.
 	os.write(rwfd, b"\x04") # Ctrl-D
@@ -188,27 +179,63 @@ def partition(uefi=False):
 	ret_code = os.waitstatus_to_exitcode(status)
 
 	if ret_code != 0:
-		os.write(2, f"error sfdisk\n".encode("utf-8"))
 		exit(1)
 
-	_, result = subprocess_output("/usr/bin/lsblk", f"{device}", "-o", "NAME")
+	_, result = subprocess_output(
+		"/usr/bin/lsblk",
+		f"{config["device"]}",
+		"-o",
+		"NAME"
+	)
 	partitions = [f"/dev/{line[2:]}" for line in result.splitlines()[3:]]
 	time.sleep(5)
 
-	for cmd, part in zip(format_cmds, partitions):
+	for cmd, part in zip(config["partition_formats"], partitions):
 		cmd += [part]
-		subprocess_output(*cmd)
+		ret_code, _ = subprocess_output(*cmd)
+		if ret_code != 0:
+			exit(1)
 
 	return partitions
 
 
+def mount_partitions(config, partitions):
+	partitions.reverse()
+	ret_code, _ = subprocess_output(
+		"/usr/bin/mount",
+		partitions[0],
+		"/mnt"
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+	ret_code, _ = subprocess_output(
+		"/usr/bin/swapon",
+		partitions[1]
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+	if config["is_uefi"]:
+		ret_code, _ = subprocess_output(
+			"/usr/bin/mount",
+			"--mkdir",
+			partitions[2],
+			"/mnt/boot"
+		)
+
+		if ret_code != 0:
+			exit(1)
+
+
 def do_install():
 	check_inet()
-	is_vm()
-	determine_additional_cpu_packages()
-	uefi = is_uefi()
-	partitions = partition(uefi)
-	print(partitions)
+	config = configure()
+	print(config)
+	partitions = partition(config)
+	mount_partitions(config, partitions)
 
 
 if __name__ == "__main__":
