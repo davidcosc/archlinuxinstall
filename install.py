@@ -20,6 +20,7 @@ def read(rfd, timeout=1):
 		# some EOF signalled via OSError and might also perma readable
 		try:
 			read_bytes = os.read(rfd, 1024)
+			print(read_bytes.decode("utf-8"), end="")
 		except OSError:
 			break
 		
@@ -32,7 +33,8 @@ def read(rfd, timeout=1):
 	return total_read_bytes.decode("utf-8")
 
 
-def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
+def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1, in_interval=0):
+	output = ""
 	mfd, sfd = os.openpty()
 	pid = os.fork()
 
@@ -54,29 +56,21 @@ def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
 
 	os.close(sfd)
 
-	if in_delay:
-		time.sleep(in_delay)
+	cmd_output = read(mfd, timeout=cmd_rtimeout)
+	# print(cmd_output)
+	output += cmd_output
 
 	for i in inputs:
 		os.write(mfd, i.encode("utf-8"))
+		in_output = read(mfd, timeout=in_rtimeout)
+		# print(in_output)
+		output += in_output
 		time.sleep(in_interval)
 
-	return pid, mfd
-
-
-def subprocess_output(*cmd, timeout=1, inputs=[], in_delay=0, in_interval=0):
-	pid, rwfd = subprocess(
-		*cmd,
-		inputs=inputs,
-		in_delay=in_delay,
-		in_interval=in_interval
-	)
-	result = read(rwfd, timeout)
-	print(result)
-	os.close(rwfd)
+	os.close(mfd)
 
 	_, status = os.waitpid(pid, 0)
-	return os.waitstatus_to_exitcode(status), result
+	return os.waitstatus_to_exitcode(status), output
 
 
 def fail_no_inet():
@@ -85,7 +79,7 @@ def fail_no_inet():
 		"-c",
 		"3",
 		"8.8.8.8",
-		timeout=2
+		cmd_rtimeout=2
 	)
 	
 	if ret_code != 0:
@@ -155,18 +149,6 @@ def configure():
 		"base-devel"	
 	]
 	return config
-
-
-def umount_partitions(device):
-	# only works for running script multiple times not prev arbitrary mounts
-	cmds = [
-		["/usr/bin/swapoff", "-a"],
-		["/usr/bin/umount", "-R", "/mnt"]
-	]
-
-	for cmd in cmds:
-		subprocess_output(*cmd)
-		time.sleep(1)
 	
 
 def partition(device):
@@ -184,10 +166,10 @@ def partition(device):
 		"--wipe-partitions",
 		"always",
 		device,
-		timeout=1,
+		cmd_rtimeout=2,
 		inputs=partitions,
-		in_delay=1,
-		in_interval=1
+		in_rtimeout=2,
+		in_interval=0
 	)
 
 	if ret_code != 0:
@@ -238,7 +220,7 @@ def add_packages(config):
 	]
 
 	for cmd in cmds:
-		ret_code, _ = subprocess_output(*cmd, timeout=10)
+		ret_code, _ = subprocess_output(*cmd, cmd_rtimeout=10)
 
 		if ret_code != 0:
 			exit(1)
@@ -278,15 +260,17 @@ def setup_system():
 		pw,
 		pw,
 		'/usr/bin/pacman -Sy --noconfirm grub efibootmgr\n',
-		'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB\n'
+		'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB\n',
+		'grub-mkconfig -o /boot/grub/grub.cfg\n',
+		'exit\n'
 	]
 	ret_code, _ = subprocess_output(
 		"/usr/bin/arch-chroot",
 		"/mnt",
-		timeout=15,
+		cmd_rtimeout=5,
 		inputs=inputs,
-		in_delay=3,
-		in_interval=3
+		in_rtimeout=5,
+		in_interval=0
 	)
 
 
@@ -295,12 +279,14 @@ def do_install():
 	fail_not_uefi()
 	config = configure()
 	print(config)
-	umount_partitions(config["device"])
+	subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
+	subprocess_output("/usr/bin/swapoff", "-a", cmd_rtimeout=5)
 	partitions = partition(config["device"])
 	mount_partitions(partitions)
 	add_packages(config)
 	gen_fstab()
 	setup_system()
+	subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
 
 
 if __name__ == "__main__":
