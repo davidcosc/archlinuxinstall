@@ -7,6 +7,31 @@ import time
 TIOCSCTTY = 0x540E
 
 
+def read(rfd, timeout=1):
+	total_read_bytes = b""
+
+	while True:
+		# we want to at most wait 1s for something to read
+		rlist, _, _ = select.select([rfd], [], [], timeout)
+
+		if not rlist:
+			break
+
+		# some EOF signalled via OSError and might also perma readable
+		try:
+			read_bytes = os.read(rfd, 1024)
+		except OSError:
+			break
+		
+		# pipes will perma be readably with EOF so we break on EOF
+		if not read_bytes:
+			break
+
+		total_read_bytes += read_bytes
+
+	return total_read_bytes.decode("utf-8")
+
+
 def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
 	mfd, sfd = os.openpty()
 	pid = os.fork()
@@ -37,31 +62,6 @@ def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
 		time.sleep(in_interval)
 
 	return pid, mfd
-
-
-def read(rfd, timeout=1):
-	total_read_bytes = b""
-
-	while True:
-		# we want to at most wait 1s for something to read
-		rlist, _, _ = select.select([rfd], [], [], timeout)
-
-		if not rlist:
-			break
-
-		# some EOF signalled via OSError and might also perma readable
-		try:
-			read_bytes = os.read(rfd, 1024)
-		except OSError:
-			break
-		
-		# pipes will perma be readably with EOF so we break on EOF
-		if not read_bytes:
-			break
-
-		total_read_bytes += read_bytes
-
-	return total_read_bytes.decode("utf-8")
 
 
 def subprocess_output(*cmd, timeout=1, inputs=[], in_delay=0, in_interval=0):
@@ -264,6 +264,32 @@ def gen_fstab():
 	subprocess_output("/usr/bin/cat", "/mnt/etc/fstab")
 
 
+def setup_system():
+	pw = get_input(f"Choose password:") + "\n"
+	inputs = [
+		'ln -sf /usr/share/zoneinfo/Europe/Berlin /etc/localtime\n',
+		'echo "en_GB.UTF-8 UTF-8" >> /etc/locale.gen\n',
+		'locale-gen\n',
+		'echo "LANG=en_GB.UTF-8" > /etc/locale.conf\n',
+		'/usr/bin/echo "KEYMAP=de-latin1" > /etc/vconsole.conf\n',
+		'/usr/bin/echo "shen" > /etc/hostname\n',
+		'systemctl enable NetworkManager\n',
+		"passwd\n",
+		pw,
+		pw,
+		'/usr/bin/pacman -Sy --noconfirm grub efibootmgr\n',
+		'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB\n'
+	]
+	ret_code, _ = subprocess_output(
+		"/usr/bin/arch-chroot",
+		"/mnt",
+		timeout=15,
+		inputs=inputs,
+		in_delay=3,
+		in_interval=3
+	)
+
+
 def do_install():
 	fail_no_inet()
 	fail_not_uefi()
@@ -274,6 +300,7 @@ def do_install():
 	mount_partitions(partitions)
 	add_packages(config)
 	gen_fstab()
+	setup_system()
 
 
 if __name__ == "__main__":
