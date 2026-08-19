@@ -30,7 +30,6 @@ def subprocess(*cmd, inputs=[], in_delay=0, in_interval=0):
 	os.close(sfd)
 
 	if in_delay:
-		os.write(0, b"in_delay\n")
 		time.sleep(in_delay)
 
 	for i in inputs:
@@ -80,7 +79,7 @@ def subprocess_output(*cmd, timeout=1, inputs=[], in_delay=0, in_interval=0):
 	return os.waitstatus_to_exitcode(status), result
 
 
-def check_inet():
+def fail_no_inet():
 	ret_code, _ = subprocess_output(
 		"/usr/bin/ping",
 		"-c",
@@ -94,7 +93,7 @@ def check_inet():
 		exit(1)
 
 
-def check_uefi():
+def fail_not_uefi():
 	ret_code, _ = subprocess_output(
 		"/usr/bin/cat",
 		"/sys/firmware/efi/fw_platform_size"
@@ -145,10 +144,30 @@ def configure():
 		"linux-headers",
 		"wireless-regdb",
 		"intel-ucode",
-		"amd-ucode"
+		"amd-ucode",
+		"dosfstools",
+		"e2fsprogs",
+		"networkmanager",
+		"nano",
+		"man-db",
+		"man-pages",
+		"texinfo",
+		"base-devel"	
 	]
 	return config
 
+
+def umount_partitions(device):
+	# only works for running script multiple times not prev arbitrary mounts
+	cmds = [
+		["/usr/bin/swapoff", "-a"],
+		["/usr/bin/umount", "-R", "/mnt"]
+	]
+
+	for cmd in cmds:
+		subprocess_output(*cmd)
+		time.sleep(1)
+	
 
 def partition(device):
 	# Ctrl-D \x04 to signal finished and y to write
@@ -176,11 +195,12 @@ def partition(device):
 
 	_, result = subprocess_output(
 		"/usr/bin/lsblk",
-		device,
-		"-o",
-		"NAME"
+		"-nrpo",
+		"NAME",
+		device
 	)
-	partitions = [f"/dev/{line[2:]}" for line in result.splitlines()[3:]]
+	partitions = result.splitlines()[2:]
+	print(partitions)
 	time.sleep(5)
 	cmds = [
 		["/usr/bin/mkfs.fat", "-F", "32", partitions[0]],
@@ -211,13 +231,49 @@ def mount_partitions(partitions):
 			exit(1)
 
 
+def add_packages(config):
+	cmds = [
+		["/usr/bin/pacman", "-Sy", "--noconfirm", "archlinux-keyring"],
+		["/usr/bin/pacstrap", "-K", "/mnt"] + config["packages"]
+	]
+
+	for cmd in cmds:
+		ret_code, _ = subprocess_output(*cmd, timeout=10)
+
+		if ret_code != 0:
+			exit(1)
+
+
+def gen_fstab():
+	ret_code, result = subprocess_output(
+		"/usr/bin/genfstab",
+		"-U",
+		"/mnt"
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+	fd = os.open(
+		"/mnt/etc/fstab",
+		os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+		0o644
+	)
+	os.write(fd, "\n".join(result.splitlines()[1:]).encode("utf-8"))
+	os.close(fd)
+	subprocess_output("/usr/bin/cat", "/mnt/etc/fstab")
+
+
 def do_install():
-	check_inet()
-	check_uefi()
+	fail_no_inet()
+	fail_not_uefi()
 	config = configure()
 	print(config)
+	umount_partitions(config["device"])
 	partitions = partition(config["device"])
 	mount_partitions(partitions)
+	add_packages(config)
+	gen_fstab()
 
 
 if __name__ == "__main__":
