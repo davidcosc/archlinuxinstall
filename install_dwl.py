@@ -80,7 +80,6 @@ def do_install():
 		"--noconfirm",
 		"wayland",
 		"wayland-protocols",
-		"wlroots0.20",
 		"foot",
 		"wmenu",
 		"git"
