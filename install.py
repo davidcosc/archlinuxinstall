@@ -191,7 +191,7 @@ def partition(device):
 	]
 
 	for cmd in cmds:
-		ret_code, _ = subprocess_output(*cmd)
+		ret_code, _ = subprocess_output(*cmd, cmd_rtimeout=15)
 		if ret_code != 0:
 			exit(1)
 
