@@ -2,6 +2,7 @@ import fcntl
 import os
 import select
 import time
+from pathlib import Path
 
 
 TIOCSCTTY = 0x540E
@@ -20,11 +21,11 @@ def read(rfd, timeout=1):
 		# some EOF signalled via OSError and might also perma readable
 		try:
 			read_bytes = os.read(rfd, 1024)
-			print(read_bytes.decode("utf-8"), end="")
+			os.write(1, read_bytes)
 		except OSError:
 			break
 		
-		# pipes will perma be readably with EOF so we break on EOF
+		# pipes will perma be readable with EOF so we break on EOF
 		if not read_bytes:
 			break
 
@@ -57,13 +58,11 @@ def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1, in_interva
 	os.close(sfd)
 
 	cmd_output = read(mfd, timeout=cmd_rtimeout)
-	# print(cmd_output)
 	output += cmd_output
 
 	for i in inputs:
 		os.write(mfd, i.encode("utf-8"))
 		in_output = read(mfd, timeout=in_rtimeout)
-		# print(in_output)
 		output += in_output
 		time.sleep(in_interval)
 
@@ -182,7 +181,7 @@ def partition(device):
 		device
 	)
 	partitions = result.splitlines()[2:]
-	print(partitions)
+	os.write(1, str(partitions).encode("utf-8") + b"\n")
 	time.sleep(5)
 	cmds = [
 		["/usr/bin/mkfs.fat", "-F", "32", partitions[0]],
@@ -246,7 +245,8 @@ def gen_fstab():
 	subprocess_output("/usr/bin/cat", "/mnt/etc/fstab")
 
 
-def setup_system():
+def setup_base_system():
+	user = get_input(f"Choose user name:") +"\n"
 	pw = get_input(f"Choose password:") + "\n"
 	inputs = [
 		'ln -sf /usr/share/zoneinfo/Europe/Berlin /etc/localtime\n',
@@ -259,9 +259,15 @@ def setup_system():
 		"passwd\n",
 		pw,
 		pw,
-		'/usr/bin/pacman -Sy --noconfirm grub efibootmgr\n',
+		f'useradd -m -g users -G wheel {user}',
+		f'passwd {user}\n',
+		pw,
+		pw,
+		'/usr/bin/pacman -Syu --noconfirm\n',
+		'/usr/bin/pacman -S --noconfirm grub efibootmgr\n',
 		'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB\n',
 		'grub-mkconfig -o /boot/grub/grub.cfg\n',
+		'/usr/bin/pacman -S --noconfirm sudo\n',
 		'exit\n'
 	]
 	ret_code, _ = subprocess_output(
@@ -274,19 +280,144 @@ def setup_system():
 	)
 
 
+def customize():
+	subprocess_output("/usr/bin/lspci", "-vnnd", "::03xx")
+	prompt = (
+		"Install userland graphics libraries:\n"
+		"1) VMware i.e. 15ad:0405\n"
+		"2) Intel i.e. 8086:*\n"
+		"3) AMD i.e. 1002:*\n"
+		"4) NVIDIA i.e. 10de:*\n"
+	)
+	result = get_input(prompt)
+
+	match result:
+		case "1":
+			packages = ["mesa"]
+		case "2":
+			packages = ["mesa", "vulkan-intel", "intel-media-driver"]
+		case "3":
+			packages = ["mesa", "vulkan-radeon"]
+		case "4":
+			packages = ["nvidia-utils"]
+
+	packages += [
+		"pipewire-jack",
+		"gnu-free-fonts",
+		"firefox",
+		"gnome-shell",
+		"gnome-session",
+		"gdm",
+		"gnome-control-center",
+		"gnome-tweaks",
+		"nautilus",
+		"gnome-terminal"
+	]
+
+	ret_code, _ = subprocess_output(
+		"/usr/bin/pacman",
+		"-S",
+		"--noconfirm",
+		"--needed",
+		*packages,
+		cmd_rtimeout=10
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+	ret_code, _ = subprocess_output(
+		"/usr/bin/systemctl",
+		"enable",
+		"gdm"
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+
+def configure_gnome():
+	config = """\
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-timeout=uint32 0
+sleep-inactive-battery-timeout=uint32 0
+power-button-action='poweroff'
+
+[org/gnome/desktop/peripherals/touchpad]
+send-events='disabled'
+
+[org/gnome/desktop/peripherals/mouse]
+accel-profile='flat'
+
+[org/gnome/mutter]
+dynamic-workspaces=false
+
+[org/gnome/desktop/wm/preferences]
+num-workspaces=1
+
+[org/gnome/desktop/input-sources]
+sources=[('xkb', 'de')]
+current=uint32 0
+"""
+
+	locks = """\
+/org/gnome/desktop/session/idle-delay
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
+/org/gnome/settings-daemon/plugins/power/power-button-action
+/org/gnome/desktop/peripherals/touchpad/send-events
+/org/gnome/desktop/peripherals/mouse/accel-profile
+/org/gnome/mutter/dynamic-workspaces
+/org/gnome/desktop/wm/preferences/num-workspaces
+/org/gnome/desktop/input-sources/sources
+/org/gnome/desktop/input-sources/current
+"""
+
+	profile = """\
+user-db:user
+system-db:ibus	
+"""
+
+	config_path = Path("/etc/dconf/db/ibus.d/01-custom-settings")
+	locks_path = Path("/etc/dconf/db/ibus.d/locks/01-custom-settings")
+	profile_path = Path("/etc/dconf/profile/user")
+
+	config_path.parent.mkdir(parents=True, exist_ok=True)
+	locks_path.parent.mkdir(parents=True, exist_ok=True)
+	profile_path.parent.mkdir(parents=True, exist_ok=True)
+
+	config_path.write_text(config)
+	locks_path.write_text(locks)
+	profile_path.write_text(profile)
+
+	ret_code, _ = subprocess_output("/usr/bin/dconf", "update")
+
+	if ret_code != 0:
+		exit(1)
+
+
 def do_install():
-	fail_no_inet()
-	fail_not_uefi()
-	config = configure()
-	print(config)
-	subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
-	subprocess_output("/usr/bin/swapoff", "-a", cmd_rtimeout=5)
-	partitions = partition(config["device"])
-	mount_partitions(partitions)
-	add_packages(config)
-	gen_fstab()
-	setup_system()
-	subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
+	ret_code, _ = subprocess_output("/usr/bin/ls", "/run/archiso")
+
+	if ret_code == 0:
+		fail_no_inet()
+		fail_not_uefi()
+		config = configure()
+		os.write(1, str(config).encode("utf-8") + b"\n")
+		subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
+		subprocess_output("/usr/bin/swapoff", "-a", cmd_rtimeout=5)
+		partitions = partition(config["device"])
+		mount_partitions(partitions)
+		add_packages(config)
+		gen_fstab()
+		setup_base_system()
+		subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
+	else:
+		customize()
+		configure_gnome()
 
 
 if __name__ == "__main__":
