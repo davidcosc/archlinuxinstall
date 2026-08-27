@@ -309,7 +309,6 @@ def customize():
 		"gnome-session",
 		"gdm",
 		"gnome-control-center",
-		"gnome-tweaks",
 		"nautilus",
 		"gnome-terminal"
 	]
@@ -397,6 +396,40 @@ system-db:ibus
 
 	if ret_code != 0:
 		exit(1)
+
+	desktop_config_dir = Path("/usr/local/share/applications")
+	desktop_config_dir.mkdir(parents=True, exist_ok=True)
+
+	desktop_files = [
+		"avahi-discover.desktop",
+		"bssh.desktop",
+		"bvnc.desktop",
+		"gnome-wellbeing-panel.desktop",
+		"lstopo.desktop",
+		"qv4l2.desktop",
+		"qvidcap.desktop",
+	]
+
+	for desktop_file in desktop_files:
+		subprocess_output(
+			"/usr/bin/cp",
+			f"/usr/share/applications/{desktop_file}",
+			f"/usr/local/share/applications/{desktop_file}",
+			cmd_rtimeout=3
+		)
+		_, result = subprocess_output(
+			"/usr/bin/bash",
+			cmd_rtimeout=3,
+			inputs=[
+				f"echo 'NoDisplay=true' >> /usr/local/share/applications/{desktop_file}\n",
+				f"cat /usr/local/share/applications/{desktop_file}\n"
+			],
+			in_rtimeout=3
+		)
+
+		if "NoDisplay" not in result:
+			print("err append")
+			exit(1)
 
 
 def do_install():
