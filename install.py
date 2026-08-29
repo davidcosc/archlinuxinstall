@@ -145,7 +145,8 @@ def configure():
 		"man-db",
 		"man-pages",
 		"texinfo",
-		"base-devel"	
+		"base-devel",
+		"git"	
 	]
 	return config
 	
@@ -432,6 +433,30 @@ system-db:ibus
 			exit(1)
 
 
+def setup_river():
+	packages = [
+		"pipewire-jack",
+		"gnu-free-fonts",
+		"firefox",
+		"greetd",
+		"greetd-tuigreet",
+		"river",
+		"foot"
+	]
+
+	ret_code, _ = subprocess_output(
+		"/usr/bin/pacman",
+		"-S",
+		"--noconfirm",
+		"--needed",
+		*packages,
+		cmd_rtimeout=10
+	)
+
+	if ret_code != 0:
+		exit(1)
+
+
 def do_install():
 	ret_code, _ = subprocess_output("/usr/bin/ls", "/run/archiso")
 
@@ -449,8 +474,9 @@ def do_install():
 		setup_base_system()
 		subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
 	else:
-		customize()
-		configure_gnome()
+		# customize()
+		# configure_gnome()
+		setup_river()
 
 
 if __name__ == "__main__":
