@@ -36,6 +36,7 @@ class TaskQueue:
 		if not self.q:
 			return None
 
+		os.write(1, b"running task\n")
 		task = self.q.popleft()
 		return task.run()
 
@@ -164,14 +165,15 @@ def decode_events(events):
 
 
 def main():
+	tasks = TaskQueue()
 	wl_display_socket = connect_to_wl_display()
 	wl_display_sock_fd = wl_display_socket.fileno()
-	wl_display_get_registry(wl_display_sock_fd)
+	tasks.add_task(Task(wl_display_get_registry, wl_display_sock_fd))
 
 	while True:
-		rlist, _, _ = select.select(
+		rlist, wlist, _ = select.select(
 			[wl_display_sock_fd],
-			[],
+			[wl_display_sock_fd],
 			[],
 			0
 		)
@@ -179,6 +181,9 @@ def main():
 		if rlist:
 			events = os.read(wl_display_sock_fd, 4096)
 			decode_events(events)
+
+		if wlist:
+			tasks.work_task()
 
 		time.sleep(1)
 
