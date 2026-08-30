@@ -6,9 +6,38 @@ import select
 import socket
 import struct
 import time
+from collections import deque
+
 
 WL_DISPLAY_OBJECT_ID = 1
 WL_DISPLAY_GET_REGISTRY_OPCODE = 1
+
+WL_REGISTRY_OBJECT_ID = 2
+WL_REGISTRY_EVENT_GLOBAL_OPCODE = 0
+
+
+class Task:
+	def __init__(self, func, *args):
+		self.func = func
+		self.args = args
+
+	def run(self):
+		return self.func(*self.args)
+
+
+class TaskQueue:
+	def __init__(self):
+		self.q = deque()
+
+	def add_task(self, task):
+		self.q.append(task)
+
+	def work_task(self):
+		if not self.q:
+			return None
+
+		task = self.q.popleft()
+		return task.run()
 
 
 # https://wayland-book.com/protocol-design/wire-protocol.html#messages
@@ -81,7 +110,14 @@ def connect_to_wl_display():
 	return sock
 
 
-def handle_events(events):
+def decode_wl_registry_event_global(event_args):
+	name, interface_str_len = struct.unpack("=II", event_args[:8])
+	interface = event_args[8:8 + interface_str_len][:-1].decode("utf-8")
+	version = struct.unpack("=I", event_args[-4:])[0]
+	os.write(1, f"args: name->{name}, interface->{interface}, version->{version}\n".encode("utf-8"))
+
+
+def decode_events(events):
 	"""
 	<interface name="wl_registry" version="1">
 		<request name="bind">
@@ -103,16 +139,28 @@ def handle_events(events):
 	if events == b"":
 		exit(1)
 
-	os.write(1, b"S -> C: " +  events.hex().encode("utf-8"))
 	offset = 0
 	
 	while offset < len(events):
-		o_id, size_opcode = struct.unpack("=II", events[offset:offset + 8])
+		o_id, size_opcode = struct.unpack(
+			"=II",
+			events[offset:offset + 8]
+		)
 		size = size_opcode >> 16
 		opcode = size_opcode & 0xFFFF
 		args = events[offset + 8: offset + size]
 		offset += size
-		os.write(1, f"o_id: {o_id}, size: {size}, opcode: {opcode}, args: {args}\n".encode("utf-8"))
+		
+
+		match (o_id, opcode):
+			case (
+				WL_REGISTRY_OBJECT_ID,
+				WL_REGISTRY_EVENT_GLOBAL_OPCODE
+			):
+				os.write(1, f"o_id: {o_id}, size: {size}, opcode: {opcode}, ".encode("utf-8"))
+				decode_wl_registry_event_global(args)
+			case _:
+				os.write(1, f"o_id: {o_id}, size: {size}, opcode: {opcode}, args: {args}\n".encode("utf-8"))
 
 
 def main():
@@ -124,14 +172,15 @@ def main():
 		rlist, _, _ = select.select(
 			[wl_display_sock_fd],
 			[],
-			[]
+			[],
+			0
 		)
 		
 		if rlist:
 			events = os.read(wl_display_sock_fd, 4096)
-			handle_events(events)
+			decode_events(events)
 
-		time.sleep(3)
+		time.sleep(1)
 
 
 
