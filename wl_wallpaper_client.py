@@ -61,6 +61,9 @@ class WlConnection:
 				+ b"\x00" * self.calc_num_pad_bytes(data)
 			)
 
+		elif arg is None:
+			return struct.pack("=I", 0)
+
 	def decode_args(self, args, arg_types):
 		offset = 0
 		decoded_args = []
@@ -107,7 +110,7 @@ class WlConnection:
 				data[num_bytes_written:]
 			)
 
-		print(f"C -> S: {data.hex()}")
+		print(f"C -> S: {data.hex()}", flush=True)
 
 	def send_messages(self):
 		while self.out_messages:
@@ -263,7 +266,7 @@ class WlCompositor:
 		self.object_id = 3
 		self.con = con
 
-	def register_request_ceeate_surface(self, new_id):
+	def register_request_create_surface(self, new_id):
 		opcode = 0
 		self.con.register_request(self.object_id, opcode, new_id)
 
@@ -274,6 +277,36 @@ class WlSurface:
 		self.con = con
 
 
+class ZwlrLayerShellV1:
+	def __init__(self, con):
+		self.object_id = 5
+		self.con = con
+
+	def register_request_get_layer_surface(
+		self,
+		new_id,
+		surface,
+		output,
+		layer,
+		namespace
+	):
+		opcode = 0
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			surface,
+			output,
+			layer,
+			namespace
+		)
+
+class ZwlrLayerSurfaceV1:
+	def __init__(self, con):
+		self.object_id = 6
+		self.con = con
+
+
 class Client:
 	def __init__(self):
 		self.con = WlConnection()
@@ -281,6 +314,8 @@ class Client:
 		self.registry = None
 		self.compositor = None
 		self.surface = None
+		self.layer_shell = None
+		self.layer_surface = None
 
 	def start(self):
 		self.con.connect()
@@ -309,10 +344,33 @@ class Client:
 
 		if self.compositor and not self.surface:
 			self.surface = WlSurface(self.con)
-			self.compositor.register_request_ceeate_surface(
+			self.compositor.register_request_create_surface(
 				self.surface.object_id
 			)
 			print(f"WlSurface created", flush=True)
+
+		lay_srf = self.registry.recv_global_events.get(
+			"zwlr_layer_shell_v1"
+		)
+
+		if lay_srf and self.surface and not self.layer_shell:
+			self.layer_shell = ZwlrLayerShellV1(self.con)
+			self.registry.register_request_bind(
+				lay_srf["name"],
+				"zwlr_layer_shell_v1",
+				lay_srf["version"],
+				self.layer_shell.object_id
+			)
+			print(f"ZwlrLayerShellV1 created")
+			self.layer_surface = ZwlrLayerSurfaceV1(self.con)
+			self.layer_shell.register_request_get_layer_surface(
+				self.layer_surface.object_id,
+				self.surface.object_id,
+				None,
+				3,
+				"overlay"
+			)
+			print(f"LayerSurface created")
 		
 
 def main():
