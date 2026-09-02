@@ -17,7 +17,7 @@ import socket
 import struct
 import time
 from collections import deque
-from enum import IntFlag
+from enum import Enum, IntFlag
 
 
 class WlConnection:
@@ -219,11 +219,11 @@ class WlRegistry:
 	def __init__(self, con):
 		self.con = con
 		self.object_id = 2
-		self.recv_global_events = {}
+		self.rcvd_g_events = {}
 
 	def handle_event_global(self, name, interface, version):
 		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
-		self.recv_global_events[interface] = {
+		self.rcvd_g_events[interface] = {
 			"name": name,
 			"version": version
 		}
@@ -252,16 +252,17 @@ class WlRegistry:
 
 class WlCompositor:
 	"""
-	<interface name="wl_compositor" version="4">
+	<interface name="wl_compositor" version="6">
 		<request name="create_surface">
-			<arg name="id" type="new_id" interface="wl_surface"/>
+			<arg name="id" type="new_id" interface="wl_surface" summary="the new surface"/>
 		</request>
 
 		<request name="create_region">
-			<arg name="id" type="new_id" interface="wl_region"/>
+			<arg name="id" type="new_id" interface="wl_region" summary="the new region"/>
 		</request>
 	</interface>
 	"""
+
 	def __init__(self, con):
 		self.object_id = 3
 		self.con = con
@@ -272,12 +273,108 @@ class WlCompositor:
 
 
 class WlSurface:
+	"""
+	<interface name="wl_surface" version="4">
+		<request name="destroy" type="destructor">
+		</request>
+
+		<request name="attach">
+			<arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+		</request>
+
+		<request name="damage">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+		</request>
+
+		<request name="frame">
+			<arg name="callback" type="new_id" interface="wl_callback"/>
+		</request>
+
+		<request name="set_opaque_region">
+			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
+		</request>
+
+		<request name="set_input_region">
+			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
+		</request>
+
+		<request name="commit">
+		</request>
+
+		<event name="enter">
+			<arg name="output" type="object" interface="wl_output"/>
+		</event>
+
+		<event name="leave">
+			<arg name="output" type="object" interface="wl_output"/>
+		</event>
+
+		<request name="set_buffer_transform" since="2">
+			<arg name="transform" type="int"/>
+		</request>
+
+		<request name="set_buffer_scale" since="3">
+			<arg name="scale" type="int"/>
+		</request>
+
+		<request name="damage_buffer" since="4">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+		</request>
+	</interface>
+	"""
+
 	def __init__(self, con):
 		self.object_id = 4
 		self.con = con
 
+	def create_shared_frame_buffer(self, size):
+		fd = os.memfd_create("bg_frame_buffer")
+		os.ftruncate(fd, size)
+		shared_frame_buffer = mmap.mmap(
+			fd,
+			size,
+			flags=mmap.MAP_SHARED,
+			prot=mmap.PROT_READ | mmap.PROT_WRITE,
+		)
+		return fd, shared_frame_buffer
+
+	def register_request_commit(self):
+		opcode = 6
+		self.con.register_request(self.object_id, opcode)
+
+
 
 class ZwlrLayerShellV1:
+	"""
+	<interface name="zwlr_layer_shell_v1" version="4">
+		<request name="get_layer_surface">
+			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
+			<arg name="surface" type="object" interface="wl_surface"/>
+			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
+			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
+			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
+		</request>
+
+		<enum name="layer">
+			<entry name="background" value="0"/>
+			<entry name="bottom" value="1"/>
+			<entry name="top" value="2"/>
+			<entry name="overlay" value="3"/>
+		</enum>
+
+		<request name="destroy" type="destructor" since="3">
+		</request>
+	</interface>
+	"""
+
 	def __init__(self, con):
 		self.object_id = 5
 		self.con = con
@@ -302,13 +399,241 @@ class ZwlrLayerShellV1:
 		)
 
 class ZwlrLayerSurfaceV1:
+	"""
+	You create wl_surface.
+	You call zwlr_layer_shell_v1.get_layer_surface(...).
+	This assigns the layer-surface role to your wl_surface.
+	You configure the layer surface with requests such as set_size, set_anchor, etc.
+	You wl_surface.commit() with no buffer attached.
+	Compositor sends zwlr_layer_surface_v1.configure.
+	You acknowledge the configure with ack_configure.
+	You create/obtain an actual wl_buffer through something like wl_shm.
+	You attach that buffer to your existing wl_surface.
+	You wl_surface.commit() again, this time with the buffer attached.
+	<interface name="zwlr_layer_surface_v1" version="4">
+		<request name="set_size">
+			<arg name="width" type="uint"/>
+			<arg name="height" type="uint"/>
+		</request>
+
+		<request name="set_anchor">
+			<arg name="anchor" type="uint" enum="anchor"/>
+		</request>
+
+		<request name="set_exclusive_zone">
+			<arg name="zone" type="int"/>
+		</request>
+
+		<request name="set_margin">
+			<arg name="top" type="int"/>
+			<arg name="right" type="int"/>
+			<arg name="bottom" type="int"/>
+			<arg name="left" type="int"/>
+		</request>
+
+		<enum name="keyboard_interactivity">
+			<entry name="none" value="0">
+			</entry>
+			<entry name="exclusive" value="1">
+			</entry>
+			<entry name="on_demand" value="2" since="4">
+			</entry>
+		</enum>
+
+		<request name="set_keyboard_interactivity">
+			<arg name="keyboard_interactivity" type="uint" enum="keyboard_interactivity"/>
+		</request>
+
+		<request name="get_popup">
+			<arg name="popup" type="object" interface="xdg_popup"/>
+		</request>
+
+		<request name="ack_configure">
+			<arg name="serial" type="uint" summary="the serial from the configure event"/>
+		</request>
+
+		<request name="destroy" type="destructor"/>
+
+		<event name="configure">
+			<arg name="serial" type="uint"/>
+			<arg name="width" type="uint"/>
+			<arg name="height" type="uint"/>
+		</event>
+
+		<event name="closed"/>
+
+		<enum name="anchor" bitfield="true">
+			<entry name="top" value="1" summary="the top edge of the anchor rectangle"/>
+			<entry name="bottom" value="2" summary="the bottom edge of the anchor rectangle"/>
+			<entry name="left" value="4" summary="the left edge of the anchor rectangle"/>
+			<entry name="right" value="8" summary="the right edge of the anchor rectangle"/>
+		</enum>
+
+		<request name="set_layer" since="2">
+			<arg name="layer" type="uint" enum="zwlr_layer_shell_v1.layer" summary="layer to move this surface to"/>
+		</request>
+	</interface>
+	"""
+
+	class Anchor(IntFlag):
+		TOP = 1
+		BOTTOM = 2
+		LEFT = 4
+		RIGHT = 8
+
 	def __init__(self, con):
 		self.object_id = 6
 		self.con = con
+		self.configured = False
+		self.width = 0
+		self.height = 0
+
+	def handle_event_configure(self, serial, width, height):
+		self.configured = True
+		self.width = width
+		self.height = height
+		print(f"Rcvd conf s {serial} w {width}, h {height}!", flush=True)
+
+	def register_event_configure(self):
+		opcode = 0
+		arg_types = (int, int, int)
+		self.con.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_configure
+		)
+
+	def register_request_set_size(self, width, height):
+		opcode = 0
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			width,
+			height
+		)
+
+	def register_request_set_anchor(self, anchor):
+		opcode = 1
+		self.con.register_request(self.object_id, opcode, anchor)
+
+
+class WlShm:
+	"""
+	<interface name="wl_shm" version="1">
+		<enum name="error">
+			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
+			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
+			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
+		</enum>
+
+		<enum name="format">
+			<entry name="argb8888" value="0" summary="32-bit ARGB format"/>
+			<entry name="xrgb8888" value="1" summary="32-bit RGB format"/>
+			<!-- The drm format codes match the #defines in drm_fourcc.h.
+				The formats actually supported by the compositor will be
+				reported by the format event. -->
+			<entry name="c8" value="0x20203843"/>
+			<entry name="rgb332" value="0x38424752"/>
+			<entry name="bgr233" value="0x38524742"/>
+			<entry name="xrgb4444" value="0x32315258"/>
+			<entry name="xbgr4444" value="0x32314258"/>
+			<entry name="rgbx4444" value="0x32315852"/>
+			<entry name="bgrx4444" value="0x32315842"/>
+			<entry name="argb4444" value="0x32315241"/>
+			<entry name="abgr4444" value="0x32314241"/>
+			<entry name="rgba4444" value="0x32314152"/>
+			<entry name="bgra4444" value="0x32314142"/>
+			<entry name="xrgb1555" value="0x35315258"/>
+			<entry name="xbgr1555" value="0x35314258"/>
+			<entry name="rgbx5551" value="0x35315852"/>
+			<entry name="bgrx5551" value="0x35315842"/>
+			<entry name="argb1555" value="0x35315241"/>
+			<entry name="abgr1555" value="0x35314241"/>
+			<entry name="rgba5551" value="0x35314152"/>
+			<entry name="bgra5551" value="0x35314142"/>
+			<entry name="rgb565" value="0x36314752"/>
+			<entry name="bgr565" value="0x36314742"/>
+			<entry name="rgb888" value="0x34324752"/>
+			<entry name="bgr888" value="0x34324742"/>
+			<entry name="xbgr8888" value="0x34324258"/>
+			<entry name="rgbx8888" value="0x34325852"/>
+			<entry name="bgrx8888" value="0x34325842"/>
+			<entry name="abgr8888" value="0x34324241"/>
+			<entry name="rgba8888" value="0x34324152"/>
+			<entry name="bgra8888" value="0x34324142"/>
+			<entry name="xrgb2101010" value="0x30335258"/>
+			<entry name="xbgr2101010" value="0x30334258"/>
+			<entry name="rgbx1010102" value="0x30335852"/>
+			<entry name="bgrx1010102" value="0x30335842"/>
+			<entry name="argb2101010" value="0x30335241"/>
+			<entry name="abgr2101010" value="0x30334241"/>
+			<entry name="rgba1010102" value="0x30334152"/>
+			<entry name="bgra1010102" value="0x30334142"/>
+			<entry name="yuyv" value="0x56595559"/>
+			<entry name="yvyu" value="0x55595659"/>
+			<entry name="uyvy" value="0x59565955"/>
+			<entry name="vyuy" value="0x59555956"/>
+			<entry name="ayuv" value="0x56555941"/>
+			<entry name="nv12" value="0x3231564e"/>
+			<entry name="nv21" value="0x3132564e"/>
+			<entry name="nv16" value="0x3631564e"/>
+			<entry name="nv61" value="0x3136564e"/>
+			<entry name="yuv410" value="0x39565559"/>
+			<entry name="yvu410" value="0x39555659"/>
+			<entry name="yuv411" value="0x31315559"/>
+			<entry name="yvu411" value="0x31315659"/>
+			<entry name="yuv420" value="0x32315559"/>
+			<entry name="yvu420" value="0x32315659"/>
+			<entry name="yuv422" value="0x36315559"/>
+			<entry name="yvu422" value="0x36315659"/>
+			<entry name="yuv444" value="0x34325559"/>
+			<entry name="yvu444" value="0x34325659"/>
+		</enum>
+
+		<request name="create_pool">
+			<arg name="id" type="new_id" interface="wl_shm_pool"/>
+			<arg name="fd" type="fd"/>
+			<arg name="size" type="int"/>
+		</request>
+
+		<event name="format">
+			<arg name="format" type="uint" enum="format"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, con):
+		self.object_id = 7
+		self.con = con
+
+	def handle_event_format(self, format):
+		print(f"Received format {format}", flush=True)
+
+	def register_event_format(self):
+		opcode = 0
+		arg_types = (int, )
+		self.con.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_format
+		)
+
+	
 
 
 class Client:
+	class State(Enum):
+		NOT_STARTED = 1
+		STARTED = 2
+		SET_COMPOSITOR = 3
+		SET_SURFACE = 4
+		SET_LAYER_SURFACE = 5
+		SET_SHM = 6
+
 	def __init__(self):
+		self.state = self.State.NOT_STARTED
 		self.con = WlConnection()
 		self.display = None
 		self.registry = None
@@ -316,6 +641,7 @@ class Client:
 		self.surface = None
 		self.layer_shell = None
 		self.layer_surface = None
+		self.shm = None
 
 	def start(self):
 		self.con.connect()
@@ -325,14 +651,18 @@ class Client:
 		self.display.register_request_get_registry(
 			self.registry.object_id
 		)
+		self.state = self.State.STARTED
 
 	def step(self):
-		if not self.display and self.registry:
+		if self.state == self.State.NOT_STARTED:
 			raise Exception("Client not started")
 		
-		comp = self.registry.recv_global_events.get("wl_compositor")
+		elif self.state == self.State.STARTED:
+			comp = self.registry.rcvd_g_events.get("wl_compositor")
 
-		if comp and not self.compositor:
+			if not comp:
+				return
+			
 			self.compositor = WlCompositor(self.con)
 			self.registry.register_request_bind(
 				comp["name"],
@@ -340,20 +670,21 @@ class Client:
 				comp["version"],
 				self.compositor.object_id
 			)
+			self.state = self.State.SET_COMPOSITOR
 			print(f"WlCompositor created", flush=True)
 
-		if self.compositor and not self.surface:
+		elif self.state == self.State.SET_COMPOSITOR:
 			self.surface = WlSurface(self.con)
 			self.compositor.register_request_create_surface(
 				self.surface.object_id
 			)
+			self.state = self.State.SET_SURFACE
 			print(f"WlSurface created", flush=True)
 
-		lay_srf = self.registry.recv_global_events.get(
-			"zwlr_layer_shell_v1"
-		)
-
-		if lay_srf and self.surface and not self.layer_shell:
+		elif self.state == self.State.SET_SURFACE:
+			lay_srf = self.registry.rcvd_g_events.get(
+				"zwlr_layer_shell_v1"
+			)
 			self.layer_shell = ZwlrLayerShellV1(self.con)
 			self.registry.register_request_bind(
 				lay_srf["name"],
@@ -361,17 +692,53 @@ class Client:
 				lay_srf["version"],
 				self.layer_shell.object_id
 			)
-			print(f"ZwlrLayerShellV1 created")
+			print(f"ZwlrLayerShellV1 created", flush=True)
 			self.layer_surface = ZwlrLayerSurfaceV1(self.con)
 			self.layer_shell.register_request_get_layer_surface(
 				self.layer_surface.object_id,
 				self.surface.object_id,
 				None,
-				3,
-				"overlay"
+				0,
+				"wallpaper"
 			)
-			print(f"LayerSurface created")
+			print(f"LayerSurface created", flush=True)
+			self.layer_surface.register_event_configure()
+			self.layer_surface.register_request_set_anchor(
+				self.layer_surface.Anchor.TOP
+				| self.layer_surface.Anchor.LEFT
+				| self.layer_surface.Anchor.RIGHT
+			)
+			self.layer_surface.register_request_set_size(
+				0,
+				64
+			)
+			self.surface.register_request_commit()
+			self.state = self.State.SET_LAYER_SURFACE
+			print(f"Commited surface", flush=True)
 		
+		elif self.state == self.State.SET_LAYER_SURFACE:
+			if not self.layer_surface.configured:
+				return
+			
+			shm = self.registry.rcvd_g_events.get(
+				"wl_shm"
+			)
+			self.layer_surface.configured = False
+			self.shm = WlShm(self.con)
+			self.shm.register_event_format()
+			self.registry.register_request_bind(
+				shm["name"],
+				"wl_shm",
+				shm["version"],
+				self.shm.object_id
+			)
+			print(f"Shm created", flush=True)
+			stride = self.layer_surface.width * 4
+			size = stride * self.layer_surface.height
+			self.surface.create_shared_frame_buffer(size)
+			self.state = self.State.SET_SHM
+			print(f"Shm frame buffer created", flush=True)
+			
 
 def main():
 	client = Client()
