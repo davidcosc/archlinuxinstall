@@ -100,14 +100,14 @@ class WlConnection:
 	def register_request(self, object_id, opcode, *args):
 		self.out_messages.append((object_id, opcode, args))
 
-	def sendall(self, data):
-		data_length = len(data)
+	def sendall(self, data, aux):
 		num_bytes_written = 0
+		auxdata = [aux] if aux else []
 
-		while num_bytes_written < data_length:
-			num_bytes_written += os.write(
-				self.sock_fd,
-				data[num_bytes_written:]
+		while num_bytes_written < len(data):
+			num_bytes_written += self.socket.sendmsg(
+				[data[num_bytes_written:]],
+				auxdata
 			)
 
 		print(f"C -> S: {data.hex()}", flush=True)
@@ -124,7 +124,7 @@ class WlConnection:
 				msg[0],
 				(message_size << 16) | msg[1]
 			)
-			self.sendall(encoded_header + encoded_args)
+			self.sendall(encoded_header + encoded_args, ())
 
 	def receive_messages(self):
 		offset = 0
@@ -487,11 +487,13 @@ class ZwlrLayerSurfaceV1:
 		self.configured = False
 		self.width = 0
 		self.height = 0
+		self.serial = -1
 
 	def handle_event_configure(self, serial, width, height):
 		self.configured = True
 		self.width = width
 		self.height = height
+		self.serial = serial
 		print(f"Rcvd conf s {serial} w {width}, h {height}!", flush=True)
 
 	def register_event_configure(self):
@@ -503,6 +505,10 @@ class ZwlrLayerSurfaceV1:
 			arg_types,
 			self.handle_event_configure
 		)
+
+	def reqister_request_ack_configure(self, serial):
+		opcode = 6
+		self.con.register_request(self.object_id, opcode, serial)
 
 	def register_request_set_size(self, width, height):
 		opcode = 0
@@ -528,67 +534,9 @@ class WlShm:
 		</enum>
 
 		<enum name="format">
-			<entry name="argb8888" value="0" summary="32-bit ARGB format"/>
-			<entry name="xrgb8888" value="1" summary="32-bit RGB format"/>
 			<!-- The drm format codes match the #defines in drm_fourcc.h.
 				The formats actually supported by the compositor will be
 				reported by the format event. -->
-			<entry name="c8" value="0x20203843"/>
-			<entry name="rgb332" value="0x38424752"/>
-			<entry name="bgr233" value="0x38524742"/>
-			<entry name="xrgb4444" value="0x32315258"/>
-			<entry name="xbgr4444" value="0x32314258"/>
-			<entry name="rgbx4444" value="0x32315852"/>
-			<entry name="bgrx4444" value="0x32315842"/>
-			<entry name="argb4444" value="0x32315241"/>
-			<entry name="abgr4444" value="0x32314241"/>
-			<entry name="rgba4444" value="0x32314152"/>
-			<entry name="bgra4444" value="0x32314142"/>
-			<entry name="xrgb1555" value="0x35315258"/>
-			<entry name="xbgr1555" value="0x35314258"/>
-			<entry name="rgbx5551" value="0x35315852"/>
-			<entry name="bgrx5551" value="0x35315842"/>
-			<entry name="argb1555" value="0x35315241"/>
-			<entry name="abgr1555" value="0x35314241"/>
-			<entry name="rgba5551" value="0x35314152"/>
-			<entry name="bgra5551" value="0x35314142"/>
-			<entry name="rgb565" value="0x36314752"/>
-			<entry name="bgr565" value="0x36314742"/>
-			<entry name="rgb888" value="0x34324752"/>
-			<entry name="bgr888" value="0x34324742"/>
-			<entry name="xbgr8888" value="0x34324258"/>
-			<entry name="rgbx8888" value="0x34325852"/>
-			<entry name="bgrx8888" value="0x34325842"/>
-			<entry name="abgr8888" value="0x34324241"/>
-			<entry name="rgba8888" value="0x34324152"/>
-			<entry name="bgra8888" value="0x34324142"/>
-			<entry name="xrgb2101010" value="0x30335258"/>
-			<entry name="xbgr2101010" value="0x30334258"/>
-			<entry name="rgbx1010102" value="0x30335852"/>
-			<entry name="bgrx1010102" value="0x30335842"/>
-			<entry name="argb2101010" value="0x30335241"/>
-			<entry name="abgr2101010" value="0x30334241"/>
-			<entry name="rgba1010102" value="0x30334152"/>
-			<entry name="bgra1010102" value="0x30334142"/>
-			<entry name="yuyv" value="0x56595559"/>
-			<entry name="yvyu" value="0x55595659"/>
-			<entry name="uyvy" value="0x59565955"/>
-			<entry name="vyuy" value="0x59555956"/>
-			<entry name="ayuv" value="0x56555941"/>
-			<entry name="nv12" value="0x3231564e"/>
-			<entry name="nv21" value="0x3132564e"/>
-			<entry name="nv16" value="0x3631564e"/>
-			<entry name="nv61" value="0x3136564e"/>
-			<entry name="yuv410" value="0x39565559"/>
-			<entry name="yvu410" value="0x39555659"/>
-			<entry name="yuv411" value="0x31315559"/>
-			<entry name="yvu411" value="0x31315659"/>
-			<entry name="yuv420" value="0x32315559"/>
-			<entry name="yvu420" value="0x32315659"/>
-			<entry name="yuv422" value="0x36315559"/>
-			<entry name="yvu422" value="0x36315659"/>
-			<entry name="yuv444" value="0x34325559"/>
-			<entry name="yvu444" value="0x34325659"/>
 		</enum>
 
 		<request name="create_pool">
@@ -703,14 +651,14 @@ class Client:
 			)
 			print(f"LayerSurface created", flush=True)
 			self.layer_surface.register_event_configure()
+			self.layer_surface.register_request_set_size(
+				0,
+				64
+			)
 			self.layer_surface.register_request_set_anchor(
 				self.layer_surface.Anchor.TOP
 				| self.layer_surface.Anchor.LEFT
 				| self.layer_surface.Anchor.RIGHT
-			)
-			self.layer_surface.register_request_set_size(
-				0,
-				64
 			)
 			self.surface.register_request_commit()
 			self.state = self.State.SET_LAYER_SURFACE
@@ -720,6 +668,10 @@ class Client:
 			if not self.layer_surface.configured:
 				return
 			
+			self.layer_surface.reqister_request_ack_configure(
+				self.layer_surface.serial
+			)
+			print("Acked configure", flush=True)
 			shm = self.registry.rcvd_g_events.get(
 				"wl_shm"
 			)
