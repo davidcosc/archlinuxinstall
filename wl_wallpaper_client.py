@@ -97,8 +97,12 @@ class WlConnection:
 			"callback": callback
 		}
 
-	def register_request(self, object_id, opcode, *args):
-		self.out_messages.append((object_id, opcode, args))
+	def register_request(self, object_id, opcode, *args, aux=()):
+		msg = {
+			"params": (object_id, opcode, args),
+			"aux": aux
+		}
+		self.out_messages.append(msg)
 
 	def sendall(self, data, aux):
 		num_bytes_written = 0
@@ -116,15 +120,15 @@ class WlConnection:
 		while self.out_messages:
 			msg = self.out_messages.popleft()
 			encoded_args = b"".join(
-				self.encode_arg(a) for a in msg[2]
+				self.encode_arg(a) for a in msg["params"][2]
 			)
 			message_size = 8 + len(encoded_args)
 			encoded_header = struct.pack(
 				"=II",
-				msg[0],
-				(message_size << 16) | msg[1]
+				msg["params"][0],
+				(message_size << 16) | msg["params"][1]
 			)
-			self.sendall(encoded_header + encoded_args, ())
+			self.sendall(encoded_header + encoded_args, msg["aux"])
 
 	def receive_messages(self):
 		offset = 0
@@ -335,21 +339,9 @@ class WlSurface:
 		self.object_id = 4
 		self.con = con
 
-	def create_shared_frame_buffer(self, size):
-		fd = os.memfd_create("bg_frame_buffer")
-		os.ftruncate(fd, size)
-		shared_frame_buffer = mmap.mmap(
-			fd,
-			size,
-			flags=mmap.MAP_SHARED,
-			prot=mmap.PROT_READ | mmap.PROT_WRITE,
-		)
-		return fd, shared_frame_buffer
-
 	def register_request_commit(self):
 		opcode = 6
 		self.con.register_request(self.object_id, opcode)
-
 
 
 class ZwlrLayerShellV1:
@@ -397,6 +389,7 @@ class ZwlrLayerShellV1:
 			layer,
 			namespace
 		)
+
 
 class ZwlrLayerSurfaceV1:
 	"""
@@ -487,12 +480,16 @@ class ZwlrLayerSurfaceV1:
 		self.configured = False
 		self.width = 0
 		self.height = 0
+		self.stride = 0
+		self.size = 0
 		self.serial = -1
 
 	def handle_event_configure(self, serial, width, height):
 		self.configured = True
 		self.width = width
 		self.height = height
+		self.stride = self.width * 4
+		self.size = self.stride * self.height
 		self.serial = serial
 		print(f"Rcvd conf s {serial} w {width}, h {height}!", flush=True)
 
@@ -554,9 +551,13 @@ class WlShm:
 	def __init__(self, con):
 		self.object_id = 7
 		self.con = con
+		self.format = -1
 
 	def handle_event_format(self, format):
 		print(f"Received format {format}", flush=True)
+
+		if format == 1:
+			self.format = 1
 
 	def register_event_format(self):
 		opcode = 0
@@ -568,7 +569,59 @@ class WlShm:
 			self.handle_event_format
 		)
 
-	
+	def register_request_create_pool(self, new_id, fd, size):
+		opcode = 0
+		aux = (
+			socket.SOL_SOCKET,
+			socket.SCM_RIGHTS,
+			struct.pack("i", fd)
+		)
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			size,
+			aux=aux
+		)
+
+
+class WlShmPool:
+	def __init__(self, con):
+		self.object_id = 8
+		self.con = con
+		self.buf_fd = -1
+		self.buf = None
+
+	def create_shared_frame_buffer(self, size):
+		self.buf_fd = os.memfd_create("bg_frame_buffer")
+		os.ftruncate(self.buf_fd, size)
+		self.buf = mmap.mmap(
+			self.buf_fd,
+			size,
+			flags=mmap.MAP_SHARED,
+			prot=mmap.PROT_READ | mmap.PROT_WRITE,
+		)
+
+	def register_request_create_buffer(
+		self,
+		new_id,
+		offset,
+		width,
+		height,
+		stride,
+		format
+	):
+		opcode = 0
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			offset,
+			width,
+			height,
+			stride,
+			format
+		)
 
 
 class Client:
@@ -578,7 +631,7 @@ class Client:
 		SET_COMPOSITOR = 3
 		SET_SURFACE = 4
 		SET_LAYER_SURFACE = 5
-		SET_SHM = 6
+		SET_SHM_POOL = 6
 
 	def __init__(self):
 		self.state = self.State.NOT_STARTED
@@ -590,6 +643,7 @@ class Client:
 		self.layer_shell = None
 		self.layer_surface = None
 		self.shm = None
+		self.shm_pool = None
 
 	def start(self):
 		self.con.connect()
@@ -685,11 +739,18 @@ class Client:
 				self.shm.object_id
 			)
 			print(f"Shm created", flush=True)
-			stride = self.layer_surface.width * 4
-			size = stride * self.layer_surface.height
-			self.surface.create_shared_frame_buffer(size)
-			self.state = self.State.SET_SHM
-			print(f"Shm frame buffer created", flush=True)
+			self.shm_pool = WlShmPool(self.con)
+			self.shm_pool.create_shared_frame_buffer(
+				self.layer_surface.size
+			)
+			self.shm.register_request_create_pool(
+				self.shm_pool.object_id,
+				self.shm_pool.buf_fd,
+				self.layer_surface.size,
+			)
+			
+			self.state = self.State.SET_SHM_POOL
+			print(f"Shm pool with frame buffer created", flush=True)
 			
 
 def main():
