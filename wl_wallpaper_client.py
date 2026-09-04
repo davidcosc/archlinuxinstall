@@ -133,7 +133,6 @@ class WlConnection:
 	def receive_messages(self):
 		offset = 0
 		data = os.read(self.sock_fd, 4096)
-		print(data, flush=True)
 
 		if data == b"":
 			exit(1)
@@ -146,6 +145,7 @@ class WlConnection:
 			size = size_opcode >> 16
 			opcode = size_opcode & 0xFFFF
 			args = data[offset + 8: offset + size]
+			print(f"S -> C: {data[offset:offset + size].hex()}", flush=True)
 			offset += size
 			event_cb = self.event_callbacks.get((object_id, opcode))
 
@@ -226,7 +226,7 @@ class WlRegistry:
 		self.rcvd_g_events = {}
 
 	def handle_event_global(self, name, interface, version):
-		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
+		# print(f"Adding global event: {name}, {interface}, {version}", flush=True)
 		self.rcvd_g_events[interface] = {
 			"name": name,
 			"version": version
@@ -338,6 +338,16 @@ class WlSurface:
 	def __init__(self, con):
 		self.object_id = 4
 		self.con = con
+
+	def register_request_attach(self, buffer, x, y):
+		opcode = 1
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			buffer,
+			x,
+			y
+		)
 
 	def register_request_commit(self):
 		opcode = 6
@@ -586,6 +596,25 @@ class WlShm:
 
 
 class WlShmPool:
+	"""
+	<interface name="wl_shm_pool" version="2">
+		<request name="create_buffer">
+			<arg name="id" type="new_id" interface="wl_buffer" summary="buffer to create"/>
+			<arg name="offset" type="int" summary="buffer byte offset within the pool"/>
+			<arg name="width" type="int" summary="buffer width, in pixels"/>
+			<arg name="height" type="int" summary="buffer height, in pixels"/>
+			<arg name="stride" type="int" summary="number of bytes from the beginning of one row to the beginning of the next row"/>
+			<arg name="format" type="uint" enum="wl_shm.format" summary="buffer pixel format"/>
+		</request>
+
+		<request name="destroy" type="destructor"/>
+
+		<request name="resize">
+			<arg name="size" type="int" summary="new size of the pool, in bytes"/>
+		</request>
+	</interface>
+	"""
+
 	def __init__(self, con):
 		self.object_id = 8
 		self.con = con
@@ -624,18 +653,35 @@ class WlShmPool:
 		)
 
 
+class WlBuffer:
+	"""
+	<interface name="wl_buffer" version="1">
+		<request name="destroy" type="destructor">
+		</request>
+
+		<event name="release">
+		</event>
+	</interface>
+
+	"""
+
+	def __init__(self, con):
+		self.object_id = 9
+		self.con = con
+
+
 class Client:
 	class State(Enum):
 		NOT_STARTED = 1
 		STARTED = 2
-		SET_COMPOSITOR = 3
-		SET_SURFACE = 4
-		SET_LAYER_SURFACE = 5
-		SET_SHM_POOL = 6
+		FIRST_SURFACE_COMMIT = 3
+		SET_SHM_POOL = 4
+		SET_BUFFER = 5
+		SET_FIRST_RENDER = 6
 
-	def __init__(self):
+	def __init__(self, con):
 		self.state = self.State.NOT_STARTED
-		self.con = WlConnection()
+		self.con = con
 		self.display = None
 		self.registry = None
 		self.compositor = None
@@ -644,25 +690,26 @@ class Client:
 		self.layer_surface = None
 		self.shm = None
 		self.shm_pool = None
+		self.buffer = None
 
-	def start(self):
-		self.con.connect()
-		self.display = WlDisplay(self.con)
-		self.registry = WlRegistry(self.con)
-		self.registry.register_event_global()
-		self.display.register_request_get_registry(
-			self.registry.object_id
-		)
-		self.state = self.State.STARTED
-
-	def step(self):
+	def run(self):
 		if self.state == self.State.NOT_STARTED:
-			raise Exception("Client not started")
+			self.con.connect()
+			self.display = WlDisplay(self.con)
+			self.registry = WlRegistry(self.con)
+			self.registry.register_event_global()
+			self.display.register_request_get_registry(
+				self.registry.object_id
+			)
+			self.state = self.State.STARTED
 		
 		elif self.state == self.State.STARTED:
 			comp = self.registry.rcvd_g_events.get("wl_compositor")
+			lay_srf = self.registry.rcvd_g_events.get(
+				"zwlr_layer_shell_v1"
+			)
 
-			if not comp:
+			if not comp and lay_srf:
 				return
 			
 			self.compositor = WlCompositor(self.con)
@@ -672,21 +719,14 @@ class Client:
 				comp["version"],
 				self.compositor.object_id
 			)
-			self.state = self.State.SET_COMPOSITOR
 			print(f"WlCompositor created", flush=True)
 
-		elif self.state == self.State.SET_COMPOSITOR:
 			self.surface = WlSurface(self.con)
 			self.compositor.register_request_create_surface(
 				self.surface.object_id
 			)
-			self.state = self.State.SET_SURFACE
 			print(f"WlSurface created", flush=True)
-
-		elif self.state == self.State.SET_SURFACE:
-			lay_srf = self.registry.rcvd_g_events.get(
-				"zwlr_layer_shell_v1"
-			)
+			
 			self.layer_shell = ZwlrLayerShellV1(self.con)
 			self.registry.register_request_bind(
 				lay_srf["name"],
@@ -695,6 +735,7 @@ class Client:
 				self.layer_shell.object_id
 			)
 			print(f"ZwlrLayerShellV1 created", flush=True)
+
 			self.layer_surface = ZwlrLayerSurfaceV1(self.con)
 			self.layer_shell.register_request_get_layer_surface(
 				self.layer_surface.object_id,
@@ -704,6 +745,7 @@ class Client:
 				"wallpaper"
 			)
 			print(f"LayerSurface created", flush=True)
+
 			self.layer_surface.register_event_configure()
 			self.layer_surface.register_request_set_size(
 				0,
@@ -715,21 +757,22 @@ class Client:
 				| self.layer_surface.Anchor.RIGHT
 			)
 			self.surface.register_request_commit()
-			self.state = self.State.SET_LAYER_SURFACE
+			self.state = self.State.FIRST_SURFACE_COMMIT
 			print(f"Commited surface", flush=True)
 		
-		elif self.state == self.State.SET_LAYER_SURFACE:
+		elif self.state == self.State.FIRST_SURFACE_COMMIT:
 			if not self.layer_surface.configured:
 				return
 			
+			self.layer_surface.configured = False
 			self.layer_surface.reqister_request_ack_configure(
 				self.layer_surface.serial
 			)
 			print("Acked configure", flush=True)
+
 			shm = self.registry.rcvd_g_events.get(
 				"wl_shm"
 			)
-			self.layer_surface.configured = False
 			self.shm = WlShm(self.con)
 			self.shm.register_event_format()
 			self.registry.register_request_bind(
@@ -739,6 +782,7 @@ class Client:
 				self.shm.object_id
 			)
 			print(f"Shm created", flush=True)
+
 			self.shm_pool = WlShmPool(self.con)
 			self.shm_pool.create_shared_frame_buffer(
 				self.layer_surface.size
@@ -748,34 +792,72 @@ class Client:
 				self.shm_pool.buf_fd,
 				self.layer_surface.size,
 			)
-			
 			self.state = self.State.SET_SHM_POOL
 			print(f"Shm pool with frame buffer created", flush=True)
+
+		elif self.state == self.State.SET_SHM_POOL:
+			if not self.shm.format == 1:
+				return
+
+			self.buffer = WlBuffer(self.con)
+			self.shm_pool.register_request_create_buffer(
+				self.buffer.object_id,
+				0,
+				self.layer_surface.width,
+				self.layer_surface.height,
+				self.layer_surface.stride,
+				self.shm.format
+			)
+			r = 0xff << 16
+			g = 0x00 << 8
+			b = 0x00
+			pixel = struct.pack("=I", r + g + b)
+			num_pixels = (
+				self.layer_surface.width
+				* self.layer_surface.height
+			)
+			self.shm_pool.buf[:] = pixel * num_pixels
+			self.surface.register_request_attach(
+				self.buffer.object_id,
+				0,
+				0
+			)
+			self.surface.register_request_commit()
+			self.state = self.State.SET_BUFFER
+			print(f"Buffer created adn attached", flush=True)
+
+		elif self.state == self.State.SET_BUFFER:
+			if not self.layer_surface.configured:
+				return
+
+			self.layer_surface.configured = False
+			self.layer_surface.reqister_request_ack_configure(
+				self.layer_surface.serial
+			)
+			self.state = self.State.SET_FIRST_RENDER
+			print("Acked configure", flush=True)
 			
 
 def main():
-	client = Client()
-	client.start()
+	client = Client(WlConnection())
 
 	while True:
-		client.step()
+		client.run()
 
-		rlist, wlist, _ = select.select(
-			[client.con.sock_fd],
+		if client.con.out_messages:
+			client.con.send_messages()
+
+		rlist, _, _ = select.select(
 			[client.con.sock_fd],
 			[],
-			0
+			[]
 		)
 		
 		if rlist:
 			client.con.receive_messages()
 
-		if wlist:
-			client.con.send_messages()
-
 		client.con.dispatch()
-		time.sleep(3)
-	
+		# time.sleep(1)
 
 
 if __name__ == "__main__":
