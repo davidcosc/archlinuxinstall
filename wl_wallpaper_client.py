@@ -18,6 +18,7 @@ import struct
 import time
 from collections import deque
 from enum import Enum, IntFlag
+from PIL import Image
 
 
 class WlConnection:
@@ -749,10 +750,11 @@ class Client:
 			self.layer_surface.register_event_configure()
 			self.layer_surface.register_request_set_size(
 				0,
-				64
+				0
 			)
 			self.layer_surface.register_request_set_anchor(
 				self.layer_surface.Anchor.TOP
+				| self.layer_surface.Anchor.BOTTOM
 				| self.layer_surface.Anchor.LEFT
 				| self.layer_surface.Anchor.RIGHT
 			)
@@ -808,15 +810,60 @@ class Client:
 				self.layer_surface.stride,
 				self.shm.format
 			)
-			r = 0xff << 16
-			g = 0x00 << 8
-			b = 0x00
-			pixel = struct.pack("=I", r + g + b)
-			num_pixels = (
-				self.layer_surface.width
-				* self.layer_surface.height
+
+			def resize_cover(path, width, height):
+				image = Image.open(path).convert("RGB")
+
+				scale = max(
+					width / image.width,
+					height / image.height
+				)
+
+				new_width = round(image.width * scale)
+				new_height = round(image.height * scale)
+
+				image = image.resize(
+					(new_width, new_height),
+					Image.Resampling.LANCZOS
+				)
+
+				left = (new_width - width) // 2
+				top = (new_height - height) // 2
+
+				return image.crop((
+					left,
+					top,
+					left + width,
+					top + height
+				))
+
+			image = resize_cover(
+				"wall1.jpg",
+				self.layer_surface.width,
+				self.layer_surface.height
 			)
-			self.shm_pool.buf[:] = pixel * num_pixels
+
+			image_bytes_rgb = image.tobytes()
+			image_bytes_xrgb = bytearray()
+
+			for i in range(0, len(image_bytes_rgb), 3):
+				image_bytes_xrgb.extend((
+					0,
+					image_bytes_rgb[i],
+					image_bytes_rgb[i + 1],
+					image_bytes_rgb[i + 2],
+				))
+
+			# r = 0xff << 16
+			# g = 0x00 << 8
+			# b = 0x00
+			# pixel = struct.pack("=I", r + g + b)
+			# num_pixels = (
+			# 	self.layer_surface.width
+			# 	* self.layer_surface.height
+			# )
+			# self.shm_pool.buf[:] = pixel * num_pixels
+			self.shm_pool.buf[:] = image_bytes_xrgb
 			self.surface.register_request_attach(
 				self.buffer.object_id,
 				0,

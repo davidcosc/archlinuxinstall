@@ -1,0 +1,13 @@
+[window]
+decorations = "None"
+opacity = 0.0
+
+[font]
+size = 14.0
+
+[font.normal]
+family = "Maple Mono"
+style = "Bold"
+
+[colors.primary]
+foreground = "#CE9178"

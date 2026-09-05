@@ -433,15 +433,15 @@ system-db:ibus
 			exit(1)
 
 
-def setup_river():
+def setup_niri():
 	packages = [
 		"pipewire-jack",
 		"gnu-free-fonts",
 		"firefox",
 		"greetd",
 		"greetd-tuigreet",
-		"river",
-		"foot"
+		"niri",
+		"alacritty"
 	]
 
 	ret_code, _ = subprocess_output(
@@ -476,7 +476,7 @@ def do_install():
 	else:
 		# customize()
 		# configure_gnome()
-		setup_river()
+		setup_niri()
 
 
 if __name__ == "__main__":
