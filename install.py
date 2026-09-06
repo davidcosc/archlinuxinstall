@@ -5,6 +5,50 @@ import time
 from pathlib import Path
 
 
+GNOME_CONFIG = """\
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-timeout=uint32 0
+sleep-inactive-battery-timeout=uint32 0
+power-button-action='poweroff'
+
+[org/gnome/desktop/peripherals/touchpad]
+send-events='disabled'
+
+[org/gnome/desktop/peripherals/mouse]
+accel-profile='flat'
+
+[org/gnome/mutter]
+dynamic-workspaces=false
+
+[org/gnome/desktop/wm/preferences]
+num-workspaces=1
+
+[org/gnome/desktop/input-sources]
+sources=[('xkb', 'de')]
+current=uint32 0
+"""
+
+GNOME_LOCKS = """\
+/org/gnome/desktop/session/idle-delay
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout
+/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
+/org/gnome/settings-daemon/plugins/power/power-button-action
+/org/gnome/desktop/peripherals/touchpad/send-events
+/org/gnome/desktop/peripherals/mouse/accel-profile
+/org/gnome/mutter/dynamic-workspaces
+/org/gnome/desktop/wm/preferences/num-workspaces
+/org/gnome/desktop/input-sources/sources
+/org/gnome/desktop/input-sources/current
+"""
+
+GNOME_PROFILE = """\
+user-db:user
+system-db:ibus
+"""
+
 TIOCSCTTY = 0x540E
 
 
@@ -12,7 +56,6 @@ def read(rfd, timeout=1):
 	total_read_bytes = b""
 
 	while True:
-		# we want to at most wait 1s for something to read
 		rlist, _, _ = select.select([rfd], [], [], timeout)
 
 		if not rlist:
@@ -25,7 +68,7 @@ def read(rfd, timeout=1):
 		except OSError:
 			break
 		
-		# pipes will perma be readable with EOF so we break on EOF
+		# fds might return EOF continuously so we break on EOF
 		if not read_bytes:
 			break
 
@@ -34,7 +77,7 @@ def read(rfd, timeout=1):
 	return total_read_bytes.decode("utf-8")
 
 
-def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1, in_interval=0):
+def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1):
 	output = ""
 	mfd, sfd = os.openpty()
 	pid = os.fork()
@@ -64,7 +107,6 @@ def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1, in_interva
 		os.write(mfd, i.encode("utf-8"))
 		in_output = read(mfd, timeout=in_rtimeout)
 		output += in_output
-		time.sleep(in_interval)
 
 	os.close(mfd)
 
@@ -124,31 +166,6 @@ def select_device():
 		os.write(1,f"Device does not exist.\n".encode("utf-8"))
 
 	return device
-
-
-def configure():
-	config = {}
-	config["device"] = select_device()
-	config["packages"] = [
-		"base",
-		"linux",
-		"linux-firmware",
-		"linux-firmware-marvell",
-		"linux-headers",
-		"wireless-regdb",
-		"intel-ucode",
-		"amd-ucode",
-		"dosfstools",
-		"e2fsprogs",
-		"networkmanager",
-		"nano",
-		"man-db",
-		"man-pages",
-		"texinfo",
-		"base-devel",
-		"git"	
-	]
-	return config
 	
 
 def partition(device):
@@ -168,8 +185,7 @@ def partition(device):
 		device,
 		cmd_rtimeout=2,
 		inputs=partitions,
-		in_rtimeout=2,
-		in_interval=0
+		in_rtimeout=2
 	)
 
 	if ret_code != 0:
@@ -213,10 +229,29 @@ def mount_partitions(partitions):
 			exit(1)
 
 
-def add_packages(config):
+def add_packages():
+	packages = [
+		"base",
+		"linux",
+		"linux-firmware",
+		"linux-firmware-marvell",
+		"linux-headers",
+		"wireless-regdb",
+		"intel-ucode",
+		"amd-ucode",
+		"dosfstools",
+		"e2fsprogs",
+		"networkmanager",
+		"nano",
+		"man-db",
+		"man-pages",
+		"texinfo",
+		"base-devel",
+		"git"	
+	]
 	cmds = [
 		["/usr/bin/pacman", "-Sy", "--noconfirm", "archlinux-keyring"],
-		["/usr/bin/pacstrap", "-K", "/mnt"] + config["packages"]
+		["/usr/bin/pacstrap", "-K", "/mnt"] + packages
 	]
 
 	for cmd in cmds:
@@ -250,6 +285,8 @@ def setup_base_system():
 	user = get_input(f"Choose user name:") +"\n"
 	pw = get_input(f"Choose password:") + "\n"
 	inputs = [
+		'set -e\n',
+		"""trap 'echo "FAILED: $BASH_COMMAND"' ERR\n""",
 		'ln -sf /usr/share/zoneinfo/Europe/Berlin /etc/localtime\n',
 		'echo "en_GB.UTF-8 UTF-8" >> /etc/locale.gen\n',
 		'locale-gen\n',
@@ -260,7 +297,7 @@ def setup_base_system():
 		"passwd\n",
 		pw,
 		pw,
-		f'useradd -m -g users -G wheel {user}',
+		f'useradd -m -g users -G wheel {user}\n',
 		f'passwd {user}\n',
 		pw,
 		pw,
@@ -276,12 +313,14 @@ def setup_base_system():
 		"/mnt",
 		cmd_rtimeout=5,
 		inputs=inputs,
-		in_rtimeout=5,
-		in_interval=0
+		in_rtimeout=5
 	)
 
+	if ret_code != 0:
+		exit(1)
 
-def customize():
+
+def configure_gnome():
 	subprocess_output("/usr/bin/lspci", "-vnnd", "::03xx")
 	prompt = (
 		"Install userland graphics libraries:\n"
@@ -335,52 +374,6 @@ def customize():
 	if ret_code != 0:
 		exit(1)
 
-
-def configure_gnome():
-	config = """\
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/settings-daemon/plugins/power]
-sleep-inactive-ac-timeout=uint32 0
-sleep-inactive-battery-timeout=uint32 0
-power-button-action='poweroff'
-
-[org/gnome/desktop/peripherals/touchpad]
-send-events='disabled'
-
-[org/gnome/desktop/peripherals/mouse]
-accel-profile='flat'
-
-[org/gnome/mutter]
-dynamic-workspaces=false
-
-[org/gnome/desktop/wm/preferences]
-num-workspaces=1
-
-[org/gnome/desktop/input-sources]
-sources=[('xkb', 'de')]
-current=uint32 0
-"""
-
-	locks = """\
-/org/gnome/desktop/session/idle-delay
-/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-timeout
-/org/gnome/settings-daemon/plugins/power/sleep-inactive-battery-timeout
-/org/gnome/settings-daemon/plugins/power/power-button-action
-/org/gnome/desktop/peripherals/touchpad/send-events
-/org/gnome/desktop/peripherals/mouse/accel-profile
-/org/gnome/mutter/dynamic-workspaces
-/org/gnome/desktop/wm/preferences/num-workspaces
-/org/gnome/desktop/input-sources/sources
-/org/gnome/desktop/input-sources/current
-"""
-
-	profile = """\
-user-db:user
-system-db:ibus	
-"""
-
 	config_path = Path("/etc/dconf/db/ibus.d/01-custom-settings")
 	locks_path = Path("/etc/dconf/db/ibus.d/locks/01-custom-settings")
 	profile_path = Path("/etc/dconf/profile/user")
@@ -389,9 +382,9 @@ system-db:ibus
 	locks_path.parent.mkdir(parents=True, exist_ok=True)
 	profile_path.parent.mkdir(parents=True, exist_ok=True)
 
-	config_path.write_text(config)
-	locks_path.write_text(locks)
-	profile_path.write_text(profile)
+	config_path.write_text(GNOME_CONFIG)
+	locks_path.write_text(GNOME_LOCKS)
+	profile_path.write_text(GNOME_PROFILE)
 
 	ret_code, _ = subprocess_output("/usr/bin/dconf", "update")
 
@@ -434,7 +427,27 @@ system-db:ibus
 
 
 def setup_niri():
-	packages = [
+	subprocess_output("/usr/bin/lspci", "-vnnd", "::03xx")
+	prompt = (
+		"Install userland graphics libraries:\n"
+		"1) VMware i.e. 15ad:0405\n"
+		"2) Intel i.e. 8086:*\n"
+		"3) AMD i.e. 1002:*\n"
+		"4) NVIDIA i.e. 10de:*\n"
+	)
+	result = get_input(prompt)
+
+	match result:
+		case "1":
+			packages = ["mesa"]
+		case "2":
+			packages = ["mesa", "vulkan-intel", "intel-media-driver"]
+		case "3":
+			packages = ["mesa", "vulkan-radeon"]
+		case "4":
+			packages = ["nvidia-utils"]
+
+	packages += [
 		"pipewire-jack",
 		"gnu-free-fonts",
 		"firefox",
@@ -456,6 +469,43 @@ def setup_niri():
 	if ret_code != 0:
 		exit(1)
 
+	users = [p for p in Path("/home").iterdir() if p.is_dir()]
+	print(users, flush=True)
+
+	if len(users) != 1:
+		exit(1)
+
+	user = users[0].name
+	greetd_config_path = Path("/etc/greetd/config.toml")
+	greetd_config_path.parent.mkdir(parents=True, exist_ok=True)
+	niri_config_path = Path(f"/home/{user}/.config/niri/config.kdl")
+	niri_config_path.parent.mkdir(parents=True, exist_ok=True)
+	alacritty_config_path = Path(
+		f"/home/{user}/.config/alacritty/alacritty.toml"
+	)
+	alacritty_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+	cmds = [
+		["/usr/bin/cp", "./greetd.toml", str(greetd_config_path)],
+		["/usr/bin/cp", "./niri.kdl", str(niri_config_path)],
+		["/usr/bin/cp", "./alacritty.toml", str(alacritty_config_path)]
+	]
+
+	for cmd in cmds:
+		ret_code, _ = subprocess_output(*cmd, cmd_rtimeout=2)
+
+		if ret_code != 0:
+			exit(1)
+
+	ret_code, _ = subprocess_output(
+		"/usr/bin/systemctl",
+		"enable",
+		"greetd"
+	)
+
+	if ret_code != 0:
+		exit(1)
+
 
 def do_install():
 	ret_code, _ = subprocess_output("/usr/bin/ls", "/run/archiso")
@@ -463,18 +513,16 @@ def do_install():
 	if ret_code == 0:
 		fail_no_inet()
 		fail_not_uefi()
-		config = configure()
-		os.write(1, str(config).encode("utf-8") + b"\n")
+		device = select_device()
 		subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
 		subprocess_output("/usr/bin/swapoff", "-a", cmd_rtimeout=5)
-		partitions = partition(config["device"])
+		partitions = partition(device)
 		mount_partitions(partitions)
-		add_packages(config)
+		add_packages()
 		gen_fstab()
 		setup_base_system()
 		subprocess_output("/usr/bin/umount", "-R", "/mnt", cmd_rtimeout=5)
 	else:
-		# customize()
 		# configure_gnome()
 		setup_niri()
 
