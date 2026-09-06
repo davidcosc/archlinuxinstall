@@ -18,6 +18,7 @@ import struct
 import time
 from collections import deque
 from enum import Enum, IntFlag
+from pathlib import Path
 from PIL import Image
 
 
@@ -191,9 +192,9 @@ class WlDisplay:
 	</interface>
 	"""
 
-	def __init__(self, con):
+	def __init__(self, con, object_id):
 		self.con = con
-		self.object_id = 1
+		self.object_id = object_id
 		
 
 	def register_request_get_registry(self, new_id):
@@ -221,13 +222,13 @@ class WlRegistry:
 	</interface>
 	"""
 
-	def __init__(self, con):
+	def __init__(self, con, object_id):
 		self.con = con
-		self.object_id = 2
+		self.object_id = object_id
 		self.rcvd_g_events = {}
 
 	def handle_event_global(self, name, interface, version):
-		# print(f"Adding global event: {name}, {interface}, {version}", flush=True)
+		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
 		self.rcvd_g_events[interface] = {
 			"name": name,
 			"version": version
@@ -255,6 +256,67 @@ class WlRegistry:
 		)
 
 
+class WlOutput:
+	"""
+	<interface name="wl_output" version="2">
+		<enum name="subpixel">
+			<entry name="unknown" value="0"/>
+			<entry name="none" value="1"/>
+			<entry name="horizontal_rgb" value="2"/>
+			<entry name="horizontal_bgr" value="3"/>
+			<entry name="vertical_rgb" value="4"/>
+			<entry name="vertical_bgr" value="5"/>
+		</enum>
+
+		<enum name="transform">
+			<entry name="normal" value="0"/>
+			<entry name="90" value="1"/>
+			<entry name="180" value="2"/>
+			<entry name="270" value="3"/>
+			<entry name="flipped" value="4"/>
+			<entry name="flipped_90" value="5"/>
+			<entry name="flipped_180" value="6"/>
+			<entry name="flipped_270" value="7"/>
+		</enum>
+
+		<event name="geometry">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="physical_width" type="int"/>
+			<arg name="physical_height" type="int"/>
+			<arg name="subpixel" type="int" enum="subpixel"/>
+			<arg name="make" type="string"/>
+			<arg name="model" type="string"/>
+			<arg name="transform" type="int" enum="transform"/>
+		</event>
+
+		<enum name="mode" bitfield="true">
+			<entry name="current" value="0x1"/>
+			<entry name="preferred" value="0x2"/>
+		</enum>
+
+		<event name="mode">
+			<arg name="flags" type="uint" enum="mode"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+			<arg name="refresh" type="int"/>
+		</event>
+
+		<event name="done" since="2">
+		</event>
+
+		<event name="scale" since="2">
+			<arg name="factor" type="int"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, con, object_id, name):
+		self.con = con
+		self.object_id = object_id
+		self.name = name
+
+
 class WlCompositor:
 	"""
 	<interface name="wl_compositor" version="6">
@@ -268,13 +330,62 @@ class WlCompositor:
 	</interface>
 	"""
 
-	def __init__(self, con):
-		self.object_id = 3
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
+		self.surfaces = []
 
 	def register_request_create_surface(self, new_id):
 		opcode = 0
 		self.con.register_request(self.object_id, opcode, new_id)
+
+
+class ZwlrLayerShellV1:
+	"""
+	<interface name="zwlr_layer_shell_v1" version="4">
+		<request name="get_layer_surface">
+			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
+			<arg name="surface" type="object" interface="wl_surface"/>
+			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
+			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
+			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
+		</request>
+
+		<enum name="layer">
+			<entry name="background" value="0"/>
+			<entry name="bottom" value="1"/>
+			<entry name="top" value="2"/>
+			<entry name="overlay" value="3"/>
+		</enum>
+
+		<request name="destroy" type="destructor" since="3">
+		</request>
+	</interface>
+	"""
+
+	def __init__(self, con, object_id):
+		self.con = con
+		self.object_id = object_id
+		self.surfaces = []
+
+	def register_request_get_layer_surface(
+		self,
+		new_id,
+		surface,
+		output,
+		layer,
+		namespace
+	):
+		opcode = 0
+		self.con.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			surface,
+			output,
+			layer,
+			namespace
+		)
 
 
 class WlSurface:
@@ -336,9 +447,9 @@ class WlSurface:
 	</interface>
 	"""
 
-	def __init__(self, con):
-		self.object_id = 4
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
 
 	def register_request_attach(self, buffer, x, y):
 		opcode = 1
@@ -353,53 +464,6 @@ class WlSurface:
 	def register_request_commit(self):
 		opcode = 6
 		self.con.register_request(self.object_id, opcode)
-
-
-class ZwlrLayerShellV1:
-	"""
-	<interface name="zwlr_layer_shell_v1" version="4">
-		<request name="get_layer_surface">
-			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
-			<arg name="surface" type="object" interface="wl_surface"/>
-			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
-			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
-			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
-		</request>
-
-		<enum name="layer">
-			<entry name="background" value="0"/>
-			<entry name="bottom" value="1"/>
-			<entry name="top" value="2"/>
-			<entry name="overlay" value="3"/>
-		</enum>
-
-		<request name="destroy" type="destructor" since="3">
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, con):
-		self.object_id = 5
-		self.con = con
-
-	def register_request_get_layer_surface(
-		self,
-		new_id,
-		surface,
-		output,
-		layer,
-		namespace
-	):
-		opcode = 0
-		self.con.register_request(
-			self.object_id,
-			opcode,
-			new_id,
-			surface,
-			output,
-			layer,
-			namespace
-		)
 
 
 class ZwlrLayerSurfaceV1:
@@ -485,9 +549,9 @@ class ZwlrLayerSurfaceV1:
 		LEFT = 4
 		RIGHT = 8
 
-	def __init__(self, con):
-		self.object_id = 6
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
 		self.configured = False
 		self.width = 0
 		self.height = 0
@@ -559,9 +623,9 @@ class WlShm:
 	</interface>
 	"""
 
-	def __init__(self, con):
-		self.object_id = 7
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
 		self.format = -1
 
 	def handle_event_format(self, format):
@@ -616,9 +680,9 @@ class WlShmPool:
 	</interface>
 	"""
 
-	def __init__(self, con):
-		self.object_id = 8
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
 		self.buf_fd = -1
 		self.buf = None
 
@@ -666,22 +730,25 @@ class WlBuffer:
 
 	"""
 
-	def __init__(self, con):
-		self.object_id = 9
+	def __init__(self, con, object_id):
 		self.con = con
+		self.object_id = object_id
 
 
 class Client:
 	class State(Enum):
-		NOT_STARTED = 1
-		STARTED = 2
-		FIRST_SURFACE_COMMIT = 3
-		SET_SHM_POOL = 4
-		SET_BUFFER = 5
-		SET_FIRST_RENDER = 6
+		CREATE_DISPLAY_REGISTRY = 1
+		CREATE_GLOBALS = 2
+		CREATE_SURFACES = 3
+		FIRST_SURFACE_COMMIT = 4
+		SET_SHM_POOL = 5
+		SET_BUFFER = 6
+		SET_FIRST_RENDER = 7
 
 	def __init__(self, con):
-		self.state = self.State.NOT_STARTED
+		self.state = self.State.CREATE_DISPLAY_REGISTRY
+		self.next_object_id = 0
+		self.released_object_ids = deque()
 		self.con = con
 		self.display = None
 		self.registry = None
@@ -693,27 +760,52 @@ class Client:
 		self.shm_pool = None
 		self.buffer = None
 
+	def get_next_object_id(self):
+		if self.released_object_ids:
+			return self.released_object_ids.popleft()
+
+		self.next_object_id += 1
+
+		if self.next_object_id > 0xfeffffff:
+			raise Exception("Ran out of client object ids")
+
+		return self.next_object_id
+		
 	def run(self):
-		if self.state == self.State.NOT_STARTED:
+		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
 			self.con.connect()
-			self.display = WlDisplay(self.con)
-			self.registry = WlRegistry(self.con)
+			self.display = WlDisplay(
+				self.con,
+				self.get_next_object_id()
+			)
+			self.registry = WlRegistry(
+				self.con,
+				self.get_next_object_id()
+			)
 			self.registry.register_event_global()
 			self.display.register_request_get_registry(
 				self.registry.object_id
 			)
-			self.state = self.State.STARTED
+			self.state = self.State.CREATE_GLOBALS
+			print(f"WlRegistry created", flush=True)
+			return False
 		
-		elif self.state == self.State.STARTED:
+		elif self.state == self.State.CREATE_GLOBALS:
 			comp = self.registry.rcvd_g_events.get("wl_compositor")
 			lay_srf = self.registry.rcvd_g_events.get(
 				"zwlr_layer_shell_v1"
 			)
+			shm = self.registry.rcvd_g_events.get(
+				"wl_shm"
+			)
 
-			if not comp and lay_srf:
-				return
+			if not (comp and lay_srf and shm):
+				return False
 			
-			self.compositor = WlCompositor(self.con)
+			self.compositor = WlCompositor(
+				self.con,
+				self.get_next_object_id()
+			)
 			self.registry.register_request_bind(
 				comp["name"],
 				"wl_compositor",
@@ -721,23 +813,48 @@ class Client:
 				self.compositor.object_id
 			)
 			print(f"WlCompositor created", flush=True)
-
-			self.surface = WlSurface(self.con)
-			self.compositor.register_request_create_surface(
-				self.surface.object_id
-			)
-			print(f"WlSurface created", flush=True)
 			
-			self.layer_shell = ZwlrLayerShellV1(self.con)
+			self.layer_shell = ZwlrLayerShellV1(
+				self.con,
+				self.get_next_object_id()
+			)
 			self.registry.register_request_bind(
 				lay_srf["name"],
 				"zwlr_layer_shell_v1",
 				lay_srf["version"],
 				self.layer_shell.object_id
 			)
+			self.state = self.State.CREATE_SURFACES
 			print(f"ZwlrLayerShellV1 created", flush=True)
 
-			self.layer_surface = ZwlrLayerSurfaceV1(self.con)
+			self.shm = WlShm(
+				self.con,
+				self.get_next_object_id()
+			)
+			self.shm.register_event_format()
+			self.registry.register_request_bind(
+				shm["name"],
+				"wl_shm",
+				shm["version"],
+				self.shm.object_id
+			)
+			print(f"Shm created", flush=True)
+			return False
+
+		elif self.state == self.State.CREATE_SURFACES:
+			self.surface = WlSurface(
+				self.con,
+				self.get_next_object_id()
+			)
+			self.compositor.register_request_create_surface(
+				self.surface.object_id
+			)
+			print(f"WlSurface created", flush=True)
+
+			self.layer_surface = ZwlrLayerSurfaceV1(
+				self.con,
+				self.get_next_object_id()
+			)
 			self.layer_shell.register_request_get_layer_surface(
 				self.layer_surface.object_id,
 				self.surface.object_id,
@@ -761,10 +878,11 @@ class Client:
 			self.surface.register_request_commit()
 			self.state = self.State.FIRST_SURFACE_COMMIT
 			print(f"Commited surface", flush=True)
+			return False
 		
 		elif self.state == self.State.FIRST_SURFACE_COMMIT:
 			if not self.layer_surface.configured:
-				return
+				return False
 			
 			self.layer_surface.configured = False
 			self.layer_surface.reqister_request_ack_configure(
@@ -772,20 +890,10 @@ class Client:
 			)
 			print("Acked configure", flush=True)
 
-			shm = self.registry.rcvd_g_events.get(
-				"wl_shm"
+			self.shm_pool = WlShmPool(
+				self.con,
+				self.get_next_object_id()
 			)
-			self.shm = WlShm(self.con)
-			self.shm.register_event_format()
-			self.registry.register_request_bind(
-				shm["name"],
-				"wl_shm",
-				shm["version"],
-				self.shm.object_id
-			)
-			print(f"Shm created", flush=True)
-
-			self.shm_pool = WlShmPool(self.con)
 			self.shm_pool.create_shared_frame_buffer(
 				self.layer_surface.size
 			)
@@ -796,12 +904,16 @@ class Client:
 			)
 			self.state = self.State.SET_SHM_POOL
 			print(f"Shm pool with frame buffer created", flush=True)
+			return True
 
 		elif self.state == self.State.SET_SHM_POOL:
 			if not self.shm.format == 1:
-				return
+				return False
 
-			self.buffer = WlBuffer(self.con)
+			self.buffer = WlBuffer(
+				self.con,
+				self.get_next_object_id()
+			)
 			self.shm_pool.register_request_create_buffer(
 				self.buffer.object_id,
 				0,
@@ -837,32 +949,17 @@ class Client:
 					top + height
 				))
 
+			users = [
+				p for p in Path("/home").iterdir() if p.is_dir()
+			]
+			user = users[0].name
 			image = resize_cover(
-				"wall1.jpg",
+				f"/home/{user}/wall1.jpg",
 				self.layer_surface.width,
 				self.layer_surface.height
 			)
 
-			image_bytes_rgb = image.tobytes()
-			image_bytes_xrgb = bytearray()
-
-			for i in range(0, len(image_bytes_rgb), 3):
-				image_bytes_xrgb.extend((
-					0,
-					image_bytes_rgb[i],
-					image_bytes_rgb[i + 1],
-					image_bytes_rgb[i + 2],
-				))
-
-			# r = 0xff << 16
-			# g = 0x00 << 8
-			# b = 0x00
-			# pixel = struct.pack("=I", r + g + b)
-			# num_pixels = (
-			# 	self.layer_surface.width
-			# 	* self.layer_surface.height
-			# )
-			# self.shm_pool.buf[:] = pixel * num_pixels
+			image_bytes_xrgb = image.tobytes("raw", "BGRX")
 			self.shm_pool.buf[:] = image_bytes_xrgb
 			self.surface.register_request_attach(
 				self.buffer.object_id,
@@ -872,10 +969,11 @@ class Client:
 			self.surface.register_request_commit()
 			self.state = self.State.SET_BUFFER
 			print(f"Buffer created adn attached", flush=True)
+			return False
 
 		elif self.state == self.State.SET_BUFFER:
 			if not self.layer_surface.configured:
-				return
+				return False
 
 			self.layer_surface.configured = False
 			self.layer_surface.reqister_request_ack_configure(
@@ -883,16 +981,20 @@ class Client:
 			)
 			self.state = self.State.SET_FIRST_RENDER
 			print("Acked configure", flush=True)
+			return False
 			
 
 def main():
 	client = Client(WlConnection())
 
 	while True:
-		client.run()
+		skip_read = client.run()
 
 		if client.con.out_messages:
 			client.con.send_messages()
+
+		if skip_read:
+			continue
 
 		rlist, _, _ = select.select(
 			[client.con.sock_fd],
@@ -902,9 +1004,7 @@ def main():
 		
 		if rlist:
 			client.con.receive_messages()
-
-		client.con.dispatch()
-		# time.sleep(1)
+			client.con.dispatch()
 
 
 if __name__ == "__main__":

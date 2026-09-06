@@ -10,4 +10,4 @@ family = "Maple Mono"
 style = "Bold"
 
 [colors.primary]
-foreground = "#CE9178"
+foreground = "#c586c0"

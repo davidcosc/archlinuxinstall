@@ -209,9 +209,9 @@ layout {
         // Gradients can use a few different interpolation color spaces.
         // For example, this is a pastel rainbow gradient via in="oklch longer hue".
         //
-        active-gradient from="#E58D1B" to="#CB2B03" angle=45
+        active-gradient from="#c586c0" to="#7f1e77" angle=45
 
-        inactive-gradient from="#E58D1B" to="#CB2B03" angle=45
+        inactive-gradient from="#c586c0" to="#7f1e77" angle=45
     }
 
     // You can enable drop shadows for windows.
@@ -272,6 +272,7 @@ layout {
 // This line starts waybar, a commonly used bar for Wayland compositors.
 // spawn-at-startup "waybar"
 spawn-at-startup "alacritty"
+spawn-at-startup "wallpaper_client"
 
 xwayland-satellite {
     off

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=NetworkManager TUI
+Exec=alacritty -e nmtui
+Icon=network-wired
+Terminal=false
+Categories=Network;

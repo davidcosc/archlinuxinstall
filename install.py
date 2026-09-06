@@ -108,9 +108,8 @@ def subprocess_output(*cmd, cmd_rtimeout=1, inputs=[], in_rtimeout=1):
 		in_output = read(mfd, timeout=in_rtimeout)
 		output += in_output
 
-	os.close(mfd)
-
 	_, status = os.waitpid(pid, 0)
+	os.close(mfd)
 	return os.waitstatus_to_exitcode(status), output
 
 
@@ -416,7 +415,8 @@ def configure_gnome():
 			cmd_rtimeout=3,
 			inputs=[
 				f"echo 'NoDisplay=true' >> /usr/local/share/applications/{desktop_file}\n",
-				f"cat /usr/local/share/applications/{desktop_file}\n"
+				f"cat /usr/local/share/applications/{desktop_file}\n",
+				"exit\n"
 			],
 			in_rtimeout=3
 		)
@@ -454,7 +454,9 @@ def setup_niri():
 		"greetd",
 		"greetd-tuigreet",
 		"niri",
-		"alacritty"
+		"alacritty",
+		"fuzzel",
+		"wiremix"
 	]
 
 	ret_code, _ = subprocess_output(
@@ -484,27 +486,41 @@ def setup_niri():
 		f"/home/{user}/.config/alacritty/alacritty.toml"
 	)
 	alacritty_config_path.parent.mkdir(parents=True, exist_ok=True)
+	fuzzel_config_path = Path(f"/home/{user}/.config/fuzzel/fuzzel.ini")
+	fuzzel_config_path.parent.mkdir(parents=True, exist_ok=True)
+	network_manager_tui_desktop_path = Path(
+		f"/home/{user}/.local/share/applications/nmtui.desktop"
+	)
+	network_manager_tui_desktop_path.parent.mkdir(
+		parents=True,
+		exist_ok=True
+	)
 
 	cmds = [
 		["/usr/bin/cp", "./greetd.toml", str(greetd_config_path)],
 		["/usr/bin/cp", "./niri.kdl", str(niri_config_path)],
-		["/usr/bin/cp", "./alacritty.toml", str(alacritty_config_path)]
+		["/usr/bin/cp", "./alacritty.toml", str(alacritty_config_path)],
+		["/usr/bin/cp", "./fuzzel.ini", str(fuzzel_config_path)],
+		[
+			"/usr/bin/cp",
+			"./nmtui.desktop",
+			str(network_manager_tui_desktop_path)
+		],
+		[
+			"/usr/bin/cp",
+			"./wl_wallpaper_client.py",
+			"/usr/bin/wallpaper_client"
+		],
+		["/usr/bin/cp", "./wall1.jpg", f"/home/{user}/wall1.jpg"],
+		["/usr/bin/chmod", "755", "/usr/bin/wallpaper_client"],
+		["/usr/bin/systemctl", "enable", "greetd"]
 	]
 
 	for cmd in cmds:
-		ret_code, _ = subprocess_output(*cmd, cmd_rtimeout=2)
+		ret_code, _ = subprocess_output(*cmd, cmd_rtimeout=5)
 
 		if ret_code != 0:
 			exit(1)
-
-	ret_code, _ = subprocess_output(
-		"/usr/bin/systemctl",
-		"enable",
-		"greetd"
-	)
-
-	if ret_code != 0:
-		exit(1)
 
 
 def do_install():
