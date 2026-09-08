@@ -129,10 +129,18 @@ class WlDisplay:
 
 		return decoded_args
 
-	def register_event(self, object_id, opcode, arg_types, callback):
+	def register_event(
+		self,
+		object_id,
+		opcode,
+		arg_types,
+		callback,
+		*additional_callback_args
+	):
 		self.event_callbacks[(object_id, opcode)] = {
 			"arg_types": arg_types,
-			"callback": callback
+			"callback": callback,
+			"additional_callback_args": additional_callback_args
 		}
 
 	def register_request(self, object_id, opcode, *args, aux=()):
@@ -193,16 +201,31 @@ class WlDisplay:
 			
 			arg_types = event_cb["arg_types"]
 			callback = event_cb["callback"]
+			additional_callback_args = (
+				event_cb["additional_callback_args"]
+			)
 			decoded_args = self.decode_args(args, arg_types)
 			self.in_messages.append(
-				(object_id, opcode, decoded_args, callback)
+				(
+					object_id,
+					opcode,
+					decoded_args,
+					callback,
+					additional_callback_args
+				)
 			)
 
 	def dispatch(self):
 		while self.in_messages:
 			msg = self.in_messages.popleft()
-			object_id, opcode, args, callback = msg
-			callback(*args)
+			(
+				object_id,
+				opcode,
+				args,
+				callback,
+				additional_callback_args
+			) = msg
+			callback(*args, *additional_callback_args)
 		
 	def register_request_get_registry(self, new_id):
 		opcode = 1
@@ -229,17 +252,14 @@ class WlRegistry:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
-		self.rcvd_g_events = {}
+		self.object_id = self.display.get_next_object_id()
+		self.global_events = deque()
 
 	def handle_event_global(self, name, interface, version):
 		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
-		self.rcvd_g_events[interface] = {
-			"name": name,
-			"version": version
-		}
+		self.global_events.append((interface, name, version))
 		
 	def register_event_global(self):
 		opcode = 0
@@ -318,9 +338,9 @@ class WlOutput:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id, name):
+	def __init__(self, display, name):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.name = name
 
 
@@ -337,9 +357,9 @@ class WlCompositor:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.surfaces = []
 
 	def register_request_create_surface(self, new_id):
@@ -370,9 +390,9 @@ class ZwlrLayerShellV1:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.surfaces = []
 
 	def register_request_get_layer_surface(
@@ -454,9 +474,9 @@ class WlSurface:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 
 	def register_request_attach(self, buffer, x, y):
 		opcode = 1
@@ -556,9 +576,9 @@ class ZwlrLayerSurfaceV1:
 		LEFT = 4
 		RIGHT = 8
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.configured = False
 		self.width = 0
 		self.height = 0
@@ -630,9 +650,9 @@ class WlShm:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.format = -1
 
 	def handle_event_format(self, format):
@@ -687,9 +707,9 @@ class WlShmPool:
 	</interface>
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 		self.buf_fd = -1
 		self.buf = None
 
@@ -737,16 +757,16 @@ class WlBuffer:
 
 	"""
 
-	def __init__(self, display, object_id):
+	def __init__(self, display):
 		self.display = display
-		self.object_id = object_id
+		self.object_id = self.display.get_next_object_id()
 
 
 class Client:
 	class State(Enum):
 		CREATE_DISPLAY_REGISTRY = 1
 		CREATE_GLOBALS = 2
-		CREATE_SURFACES = 3
+		HANDLE_OUTPUTS = 3
 		FIRST_SURFACE_COMMIT = 4
 		SET_SHM_POOL = 5
 		SET_BUFFER = 6
@@ -768,10 +788,7 @@ class Client:
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
 			self.display = WlDisplay()
 			self.display.connect()
-			self.registry = WlRegistry(
-				self.display,
-				self.display.get_next_object_id()
-			)
+			self.registry = WlRegistry(self.display)
 			self.registry.register_event_global()
 			self.display.register_request_get_registry(
 				self.registry.object_id
@@ -781,70 +798,69 @@ class Client:
 			return False
 		
 		elif self.state == self.State.CREATE_GLOBALS:
-			comp = self.registry.rcvd_g_events.get("wl_compositor")
-			lay_srf = self.registry.rcvd_g_events.get(
-				"zwlr_layer_shell_v1"
-			)
-			shm = self.registry.rcvd_g_events.get(
-				"wl_shm"
-			)
+			for _ in range(len(self.registry.global_events)):
+				iface, name, version = (
+					self.registry.global_events.popleft()
+				)
 
-			if not (comp and lay_srf and shm):
-				return False
-			
-			self.compositor = WlCompositor(
-				self.display,
-				self.display.get_next_object_id()
-			)
-			self.registry.register_request_bind(
-				comp["name"],
-				"wl_compositor",
-				comp["version"],
-				self.compositor.object_id
-			)
-			print(f"WlCompositor created", flush=True)
-			
-			self.layer_shell = ZwlrLayerShellV1(
-				self.display,
-				self.display.get_next_object_id()
-			)
-			self.registry.register_request_bind(
-				lay_srf["name"],
-				"zwlr_layer_shell_v1",
-				lay_srf["version"],
-				self.layer_shell.object_id
-			)
-			self.state = self.State.CREATE_SURFACES
-			print(f"ZwlrLayerShellV1 created", flush=True)
+				if iface == "wl_output":
+					self.registry.global_events.append((
+						iface,
+						name,
+						version
+					))
 
-			self.shm = WlShm(
-				self.display,
-				self.display.get_next_object_id()
-			)
-			self.shm.register_event_format()
-			self.registry.register_request_bind(
-				shm["name"],
-				"wl_shm",
-				shm["version"],
-				self.shm.object_id
-			)
-			print(f"Shm created", flush=True)
+				if iface == "wl_compositor":
+					self.compositor = WlCompositor(
+						self.display
+					)
+					self.registry.register_request_bind(
+						name,
+						iface,
+						version,
+						self.compositor.object_id
+					)
+					print(f"WlCompositor created", flush=True)
+
+				elif iface == "zwlr_layer_shell_v1":
+					self.layer_shell = ZwlrLayerShellV1(
+						self.display
+					)
+					self.registry.register_request_bind(
+						name,
+						iface,
+						version,
+						self.layer_shell.object_id
+					)
+					print(f"ZwlrLayerShellV1 created", flush=True)
+
+				elif iface == "wl_shm":
+					self.shm = WlShm(
+						self.display
+					)
+					self.shm.register_event_format()
+					self.registry.register_request_bind(
+						name,
+						iface,
+						version,
+						self.shm.object_id
+					)
+					print(f"Shm created", flush=True)
+
+			if self.compositor and self.layer_shell and self.shm:
+				self.state = self.State.HANDLE_OUTPUTS
+
+			print(f"Global events {self.registry.global_events}", flush=True)
 			return False
 
-		elif self.state == self.State.CREATE_SURFACES:
-			self.surface = WlSurface(
-				self.display,
-				self.display.get_next_object_id()
-			)
+		elif self.state == self.State.HANDLE_OUTPUTS:
+			self.surface = WlSurface(self.display)
 			self.compositor.register_request_create_surface(
 				self.surface.object_id
 			)
 			print(f"WlSurface created", flush=True)
 
-			self.layer_surface = ZwlrLayerSurfaceV1(
-				self.display,
-				self.display.get_next_object_id()
-			)
+			self.layer_surface = ZwlrLayerSurfaceV1(self.display)
 			self.layer_shell.register_request_get_layer_surface(
 				self.layer_surface.object_id,
 				self.surface.object_id,
@@ -880,10 +896,7 @@ class Client:
 			)
 			print("Acked configure", flush=True)
 
-			self.shm_pool = WlShmPool(
-				self.display,
-				self.display.get_next_object_id()
-			)
+			self.shm_pool = WlShmPool(self.display)
 			self.shm_pool.create_shared_frame_buffer(
 				self.layer_surface.size
 			)
@@ -900,10 +913,7 @@ class Client:
 			if not self.shm.format == 1:
 				return False
 
-			self.buffer = WlBuffer(
-				self.display,
-				self.display.get_next_object_id()
-			)
+			self.buffer = WlBuffer(self.display)
 			self.shm_pool.register_request_create_buffer(
 				self.buffer.object_id,
 				0,
