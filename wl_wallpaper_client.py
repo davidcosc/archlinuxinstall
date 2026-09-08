@@ -255,10 +255,15 @@ class WlRegistry:
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
+		self.global_remove_events = deque()
 		self.global_events = deque()
+		self.output_events = deque()
 
 	def handle_event_global(self, name, interface, version):
 		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
+		if interface == "wl_output":
+			self.output_events.append((interface, name, version))
+
 		self.global_events.append((interface, name, version))
 		
 	def register_event_global(self):
@@ -271,6 +276,19 @@ class WlRegistry:
 			self.handle_event_global
 		)
 
+	def handle_event_global_remove(self, name):
+		self.global_remove_events.append(name)
+
+	def register_event_global_remove(self, name):
+		opcode = 1
+		arg_types = (int,)
+		self.display.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_global_remove
+		)
+
 	def register_request_bind(self, name, interface, version, new_id):
 		opcode = 0
 		self.display.register_request(
@@ -281,67 +299,6 @@ class WlRegistry:
 			version,
 			new_id
 		)
-
-
-class WlOutput:
-	"""
-	<interface name="wl_output" version="2">
-		<enum name="subpixel">
-			<entry name="unknown" value="0"/>
-			<entry name="none" value="1"/>
-			<entry name="horizontal_rgb" value="2"/>
-			<entry name="horizontal_bgr" value="3"/>
-			<entry name="vertical_rgb" value="4"/>
-			<entry name="vertical_bgr" value="5"/>
-		</enum>
-
-		<enum name="transform">
-			<entry name="normal" value="0"/>
-			<entry name="90" value="1"/>
-			<entry name="180" value="2"/>
-			<entry name="270" value="3"/>
-			<entry name="flipped" value="4"/>
-			<entry name="flipped_90" value="5"/>
-			<entry name="flipped_180" value="6"/>
-			<entry name="flipped_270" value="7"/>
-		</enum>
-
-		<event name="geometry">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="physical_width" type="int"/>
-			<arg name="physical_height" type="int"/>
-			<arg name="subpixel" type="int" enum="subpixel"/>
-			<arg name="make" type="string"/>
-			<arg name="model" type="string"/>
-			<arg name="transform" type="int" enum="transform"/>
-		</event>
-
-		<enum name="mode" bitfield="true">
-			<entry name="current" value="0x1"/>
-			<entry name="preferred" value="0x2"/>
-		</enum>
-
-		<event name="mode">
-			<arg name="flags" type="uint" enum="mode"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-			<arg name="refresh" type="int"/>
-		</event>
-
-		<event name="done" since="2">
-		</event>
-
-		<event name="scale" since="2">
-			<arg name="factor" type="int"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display, name):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.name = name
 
 
 class WlCompositor:
@@ -413,6 +370,115 @@ class ZwlrLayerShellV1:
 			layer,
 			namespace
 		)
+
+
+class WlShm:
+	"""
+	<interface name="wl_shm" version="1">
+		<enum name="error">
+			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
+			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
+			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
+		</enum>
+
+		<enum name="format">
+			<!-- The drm format codes match the #defines in drm_fourcc.h.
+				The formats actually supported by the compositor will be
+				reported by the format event. -->
+		</enum>
+
+		<request name="create_pool">
+			<arg name="id" type="new_id" interface="wl_shm_pool"/>
+			<arg name="fd" type="fd"/>
+			<arg name="size" type="int"/>
+		</request>
+
+		<event name="format">
+			<arg name="format" type="uint" enum="format"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, display):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.format = 1
+
+	def register_request_create_pool(self, new_id, fd, size):
+		opcode = 0
+		aux = (
+			socket.SOL_SOCKET,
+			socket.SCM_RIGHTS,
+			struct.pack("i", fd)
+		)
+		self.display.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			size,
+			aux=aux
+		)
+
+
+class WlOutput:
+	"""
+	<interface name="wl_output" version="2">
+		<enum name="subpixel">
+			<entry name="unknown" value="0"/>
+			<entry name="none" value="1"/>
+			<entry name="horizontal_rgb" value="2"/>
+			<entry name="horizontal_bgr" value="3"/>
+			<entry name="vertical_rgb" value="4"/>
+			<entry name="vertical_bgr" value="5"/>
+		</enum>
+
+		<enum name="transform">
+			<entry name="normal" value="0"/>
+			<entry name="90" value="1"/>
+			<entry name="180" value="2"/>
+			<entry name="270" value="3"/>
+			<entry name="flipped" value="4"/>
+			<entry name="flipped_90" value="5"/>
+			<entry name="flipped_180" value="6"/>
+			<entry name="flipped_270" value="7"/>
+		</enum>
+
+		<event name="geometry">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="physical_width" type="int"/>
+			<arg name="physical_height" type="int"/>
+			<arg name="subpixel" type="int" enum="subpixel"/>
+			<arg name="make" type="string"/>
+			<arg name="model" type="string"/>
+			<arg name="transform" type="int" enum="transform"/>
+		</event>
+
+		<enum name="mode" bitfield="true">
+			<entry name="current" value="0x1"/>
+			<entry name="preferred" value="0x2"/>
+		</enum>
+
+		<event name="mode">
+			<arg name="flags" type="uint" enum="mode"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+			<arg name="refresh" type="int"/>
+		</event>
+
+		<event name="done" since="2">
+		</event>
+
+		<event name="scale" since="2">
+			<arg name="factor" type="int"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, display, name):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.name = name
 
 
 class WlSurface:
@@ -623,70 +689,6 @@ class ZwlrLayerSurfaceV1:
 		self.display.register_request(self.object_id, opcode, anchor)
 
 
-class WlShm:
-	"""
-	<interface name="wl_shm" version="1">
-		<enum name="error">
-			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
-			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
-			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
-		</enum>
-
-		<enum name="format">
-			<!-- The drm format codes match the #defines in drm_fourcc.h.
-				The formats actually supported by the compositor will be
-				reported by the format event. -->
-		</enum>
-
-		<request name="create_pool">
-			<arg name="id" type="new_id" interface="wl_shm_pool"/>
-			<arg name="fd" type="fd"/>
-			<arg name="size" type="int"/>
-		</request>
-
-		<event name="format">
-			<arg name="format" type="uint" enum="format"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.format = -1
-
-	def handle_event_format(self, format):
-		print(f"Received format {format}", flush=True)
-
-		if format == 1:
-			self.format = 1
-
-	def register_event_format(self):
-		opcode = 0
-		arg_types = (int, )
-		self.display.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.handle_event_format
-		)
-
-	def register_request_create_pool(self, new_id, fd, size):
-		opcode = 0
-		aux = (
-			socket.SOL_SOCKET,
-			socket.SCM_RIGHTS,
-			struct.pack("i", fd)
-		)
-		self.display.register_request(
-			self.object_id,
-			opcode,
-			new_id,
-			size,
-			aux=aux
-		)
-
-
 class WlShmPool:
 	"""
 	<interface name="wl_shm_pool" version="2">
@@ -777,10 +779,11 @@ class Client:
 		self.display = None
 		self.registry = None
 		self.compositor = None
-		self.surface = None
-		self.layer_shell = None
-		self.layer_surface = None
 		self.shm = None
+		self.layer_shell = None
+		self.outputs = deque()
+		self.surface = None
+		self.layer_surface = None
 		self.shm_pool = None
 		self.buffer = None
 		
@@ -802,13 +805,6 @@ class Client:
 				iface, name, version = (
 					self.registry.global_events.popleft()
 				)
-
-				if iface == "wl_output":
-					self.registry.global_events.append((
-						iface,
-						name,
-						version
-					))
 
 				if iface == "wl_compositor":
 					self.compositor = WlCompositor(
@@ -838,7 +834,6 @@ class Client:
 					self.shm = WlShm(
 						self.display
 					)
-					self.shm.register_event_format()
 					self.registry.register_request_bind(
 						name,
 						iface,
@@ -850,10 +845,40 @@ class Client:
 			if self.compositor and self.layer_shell and self.shm:
 				self.state = self.State.HANDLE_OUTPUTS
 
-			print(f"Global events {self.registry.global_events}", flush=True)
 			return False
 
 		elif self.state == self.State.HANDLE_OUTPUTS:
+			# destroy removed outputs
+			for _ in range(len(self.registry.global_remove_events)):
+				name = (
+					self.registry.global_remove_events
+					.popleft()
+				)
+				removed_output = None
+
+				for output in self.outputs:
+					if output.name == name:
+						removed_output = output
+						break
+				if removed_output:
+					self.outputs.remove(removed_output)
+				# TODO: whatever else needs to be done to destroy
+				# surfaces, buffers etc?
+
+			# create new outputs
+			for _ in range(len(self.registry.output_events)):
+				iface, name, version = (
+					self.registry.output_events.popleft()
+				)
+				output = WlOutput(self.display, name)
+				self.outputs.append(output)
+				self.registry.register_request_bind(
+					name,
+					iface,
+					version,
+					output.object_id
+				)
+
 			self.surface = WlSurface(self.display)
 			self.compositor.register_request_create_surface(
 				self.surface.object_id
@@ -910,9 +935,6 @@ class Client:
 			return True
 
 		elif self.state == self.State.SET_SHM_POOL:
-			if not self.shm.format == 1:
-				return False
-
 			self.buffer = WlBuffer(self.display)
 			self.shm_pool.register_request_create_buffer(
 				self.buffer.object_id,
