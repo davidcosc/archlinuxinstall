@@ -22,13 +22,49 @@ from pathlib import Path
 from PIL import Image
 
 
-class WlConnection:
+class WlDisplay:
+	"""
+	<interface name="wl_display" version="1">
+		<request name="sync">
+			<arg name="callback" type="new_id" interface="wl_callback"/>
+		</request>
+
+		<request name="get_registry">
+			<arg name="registry" type="new_id" interface="wl_registry"/>
+		</request>
+
+		<event name="error">
+			<arg name="object_id" type="object"/>
+			<arg name="code" type="uint"/>
+			<arg name="message" type="string"/>
+		</event>
+
+		<event name="delete_id">
+			<arg name="id" type="uint" />
+		</event>
+	</interface>
+	"""
+
 	def __init__(self):
+		self.next_object_id = 0
+		self.released_object_ids = deque()
+		self.object_id = self.get_next_object_id()
 		self.socket = None
 		self.sock_fd = -1
 		self.out_messages = deque()
 		self.in_messages = deque()
 		self.event_callbacks = {}
+
+	def get_next_object_id(self):
+		if self.released_object_ids:
+			return self.released_object_ids.popleft()
+
+		self.next_object_id += 1
+
+		if self.next_object_id > 0xfeffffff:
+			raise Exception("Ran out of client object ids")
+
+		return self.next_object_id
 
 	def connect(self):
 		# https://wayland-book.com/protocol-design/wire-protocol.html#transports
@@ -167,39 +203,10 @@ class WlConnection:
 			msg = self.in_messages.popleft()
 			object_id, opcode, args, callback = msg
 			callback(*args)
-
-
-class WlDisplay:
-	"""
-	<interface name="wl_display" version="1">
-		<request name="sync">
-			<arg name="callback" type="new_id" interface="wl_callback"/>
-		</request>
-
-		<request name="get_registry">
-			<arg name="registry" type="new_id" interface="wl_registry"/>
-		</request>
-
-		<event name="error">
-			<arg name="object_id" type="object"/>
-			<arg name="code" type="uint"/>
-			<arg name="message" type="string"/>
-		</event>
-
-		<event name="delete_id">
-			<arg name="id" type="uint" />
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, con, object_id):
-		self.con = con
-		self.object_id = object_id
 		
-
 	def register_request_get_registry(self, new_id):
 		opcode = 1
-		self.con.register_request(self.object_id, opcode, new_id)
+		self.register_request(self.object_id, opcode, new_id)
 
 
 class WlRegistry:
@@ -222,8 +229,8 @@ class WlRegistry:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.rcvd_g_events = {}
 
@@ -237,7 +244,7 @@ class WlRegistry:
 	def register_event_global(self):
 		opcode = 0
 		arg_types = (int, str, int)
-		self.con.register_event(
+		self.display.register_event(
 			self.object_id,
 			opcode,
 			arg_types,
@@ -246,7 +253,7 @@ class WlRegistry:
 
 	def register_request_bind(self, name, interface, version, new_id):
 		opcode = 0
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			name,
@@ -311,8 +318,8 @@ class WlOutput:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id, name):
-		self.con = con
+	def __init__(self, display, object_id, name):
+		self.display = display
 		self.object_id = object_id
 		self.name = name
 
@@ -330,14 +337,14 @@ class WlCompositor:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.surfaces = []
 
 	def register_request_create_surface(self, new_id):
 		opcode = 0
-		self.con.register_request(self.object_id, opcode, new_id)
+		self.display.register_request(self.object_id, opcode, new_id)
 
 
 class ZwlrLayerShellV1:
@@ -363,8 +370,8 @@ class ZwlrLayerShellV1:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.surfaces = []
 
@@ -377,7 +384,7 @@ class ZwlrLayerShellV1:
 		namespace
 	):
 		opcode = 0
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -447,13 +454,13 @@ class WlSurface:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 
 	def register_request_attach(self, buffer, x, y):
 		opcode = 1
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			buffer,
@@ -463,7 +470,7 @@ class WlSurface:
 
 	def register_request_commit(self):
 		opcode = 6
-		self.con.register_request(self.object_id, opcode)
+		self.display.register_request(self.object_id, opcode)
 
 
 class ZwlrLayerSurfaceV1:
@@ -549,8 +556,8 @@ class ZwlrLayerSurfaceV1:
 		LEFT = 4
 		RIGHT = 8
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.configured = False
 		self.width = 0
@@ -571,7 +578,7 @@ class ZwlrLayerSurfaceV1:
 	def register_event_configure(self):
 		opcode = 0
 		arg_types = (int, int, int)
-		self.con.register_event(
+		self.display.register_event(
 			self.object_id,
 			opcode,
 			arg_types,
@@ -580,11 +587,11 @@ class ZwlrLayerSurfaceV1:
 
 	def reqister_request_ack_configure(self, serial):
 		opcode = 6
-		self.con.register_request(self.object_id, opcode, serial)
+		self.display.register_request(self.object_id, opcode, serial)
 
 	def register_request_set_size(self, width, height):
 		opcode = 0
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			width,
@@ -593,7 +600,7 @@ class ZwlrLayerSurfaceV1:
 
 	def register_request_set_anchor(self, anchor):
 		opcode = 1
-		self.con.register_request(self.object_id, opcode, anchor)
+		self.display.register_request(self.object_id, opcode, anchor)
 
 
 class WlShm:
@@ -623,8 +630,8 @@ class WlShm:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.format = -1
 
@@ -637,7 +644,7 @@ class WlShm:
 	def register_event_format(self):
 		opcode = 0
 		arg_types = (int, )
-		self.con.register_event(
+		self.display.register_event(
 			self.object_id,
 			opcode,
 			arg_types,
@@ -651,7 +658,7 @@ class WlShm:
 			socket.SCM_RIGHTS,
 			struct.pack("i", fd)
 		)
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -680,8 +687,8 @@ class WlShmPool:
 	</interface>
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 		self.buf_fd = -1
 		self.buf = None
@@ -706,7 +713,7 @@ class WlShmPool:
 		format
 	):
 		opcode = 0
-		self.con.register_request(
+		self.display.register_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -730,8 +737,8 @@ class WlBuffer:
 
 	"""
 
-	def __init__(self, con, object_id):
-		self.con = con
+	def __init__(self, display, object_id):
+		self.display = display
 		self.object_id = object_id
 
 
@@ -745,11 +752,8 @@ class Client:
 		SET_BUFFER = 6
 		SET_FIRST_RENDER = 7
 
-	def __init__(self, con):
+	def __init__(self):
 		self.state = self.State.CREATE_DISPLAY_REGISTRY
-		self.next_object_id = 0
-		self.released_object_ids = deque()
-		self.con = con
 		self.display = None
 		self.registry = None
 		self.compositor = None
@@ -759,28 +763,14 @@ class Client:
 		self.shm = None
 		self.shm_pool = None
 		self.buffer = None
-
-	def get_next_object_id(self):
-		if self.released_object_ids:
-			return self.released_object_ids.popleft()
-
-		self.next_object_id += 1
-
-		if self.next_object_id > 0xfeffffff:
-			raise Exception("Ran out of client object ids")
-
-		return self.next_object_id
 		
 	def run(self):
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
-			self.con.connect()
-			self.display = WlDisplay(
-				self.con,
-				self.get_next_object_id()
-			)
+			self.display = WlDisplay()
+			self.display.connect()
 			self.registry = WlRegistry(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.registry.register_event_global()
 			self.display.register_request_get_registry(
@@ -803,8 +793,8 @@ class Client:
 				return False
 			
 			self.compositor = WlCompositor(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.registry.register_request_bind(
 				comp["name"],
@@ -815,8 +805,8 @@ class Client:
 			print(f"WlCompositor created", flush=True)
 			
 			self.layer_shell = ZwlrLayerShellV1(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.registry.register_request_bind(
 				lay_srf["name"],
@@ -828,8 +818,8 @@ class Client:
 			print(f"ZwlrLayerShellV1 created", flush=True)
 
 			self.shm = WlShm(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.shm.register_event_format()
 			self.registry.register_request_bind(
@@ -843,8 +833,8 @@ class Client:
 
 		elif self.state == self.State.CREATE_SURFACES:
 			self.surface = WlSurface(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.compositor.register_request_create_surface(
 				self.surface.object_id
@@ -852,8 +842,8 @@ class Client:
 			print(f"WlSurface created", flush=True)
 
 			self.layer_surface = ZwlrLayerSurfaceV1(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.layer_shell.register_request_get_layer_surface(
 				self.layer_surface.object_id,
@@ -891,8 +881,8 @@ class Client:
 			print("Acked configure", flush=True)
 
 			self.shm_pool = WlShmPool(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.shm_pool.create_shared_frame_buffer(
 				self.layer_surface.size
@@ -911,8 +901,8 @@ class Client:
 				return False
 
 			self.buffer = WlBuffer(
-				self.con,
-				self.get_next_object_id()
+				self.display,
+				self.display.get_next_object_id()
 			)
 			self.shm_pool.register_request_create_buffer(
 				self.buffer.object_id,
@@ -985,26 +975,26 @@ class Client:
 			
 
 def main():
-	client = Client(WlConnection())
+	client = Client()
 
 	while True:
 		skip_read = client.run()
 
-		if client.con.out_messages:
-			client.con.send_messages()
+		if client.display.out_messages:
+			client.display.send_messages()
 
 		if skip_read:
 			continue
 
 		rlist, _, _ = select.select(
-			[client.con.sock_fd],
+			[client.display.sock_fd],
 			[],
 			[]
 		)
 		
 		if rlist:
-			client.con.receive_messages()
-			client.con.dispatch()
+			client.display.receive_messages()
+			client.display.dispatch()
 
 
 if __name__ == "__main__":
