@@ -49,8 +49,6 @@ class WlDisplay:
 		self.next_object_id = 0
 		self.released_object_ids = deque()
 		self.object_id = self.get_next_object_id()
-		self.socket = None
-		self.sock_fd = -1
 		self.out_messages = deque()
 		self.in_messages = deque()
 		self.event_callbacks = {}
@@ -77,9 +75,9 @@ class WlDisplay:
 		
 		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
 		path = os.path.join(runtime_dir, display)
-		self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		self.socket.connect(path)
-		self.sock_fd = self.socket.fileno()
+		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		sock.connect(path)
+		return sock
 
 	def pad4(self, data):
 		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
@@ -101,6 +99,20 @@ class WlDisplay:
 
 		elif arg is None:
 			return struct.pack("=I", 0)
+
+	def encode_message(self, msg):
+		encoded_args = b"".join(
+			self.encode_arg(a) for a in msg["params"][2]
+		)
+		message_size = 8 + len(encoded_args)
+		encoded_header = struct.pack(
+			"=II",
+			msg["params"][0],
+			(message_size << 16) | msg["params"][1]
+		)
+		data = encoded_header + encoded_args
+		print(f"C -> S: {data.hex()}", flush=True)
+		return data, msg["aux"]
 
 	def decode_args(self, args, arg_types):
 		offset = 0
@@ -128,33 +140,6 @@ class WlDisplay:
 				offset += self.pad4(arg)
 
 		return decoded_args
-
-	def register_event(self, object_id, opcode, arg_types, callback):
-		self.event_callbacks[(object_id, opcode)] = {
-			"arg_types": arg_types,
-			"callback": callback
-		}
-
-	def register_request(self, object_id, opcode, *args, aux=()):
-		msg = {
-			"params": (object_id, opcode, args),
-			"aux": aux
-		}
-		self.out_messages.append(msg)
-
-	def encode_message(self, msg):
-		encoded_args = b"".join(
-			self.encode_arg(a) for a in msg["params"][2]
-		)
-		message_size = 8 + len(encoded_args)
-		encoded_header = struct.pack(
-			"=II",
-			msg["params"][0],
-			(message_size << 16) | msg["params"][1]
-		)
-		data = encoded_header + encoded_args
-		print(f"C -> S: {data.hex()}", flush=True)
-		return data, msg["aux"]
 
 	def decode_messages(self, data):
 		offset = 0
@@ -184,6 +169,19 @@ class WlDisplay:
 		while self.in_messages:
 			callback, args = self.in_messages.popleft()
 			callback(*args)
+
+	def register_event(self, object_id, opcode, arg_types, callback):
+		self.event_callbacks[(object_id, opcode)] = {
+			"arg_types": arg_types,
+			"callback": callback
+		}
+
+	def register_request(self, object_id, opcode, *args, aux=()):
+		msg = {
+			"params": (object_id, opcode, args),
+			"aux": aux
+		}
+		self.out_messages.append(msg)
 
 	def handle_event_error(self, object_id, code, message):
 		raise Exception(
@@ -749,6 +747,7 @@ class Client:
 
 	def __init__(self):
 		self.state = self.State.CREATE_DISPLAY_REGISTRY
+		self.socket = None
 		self.display = None
 		self.registry = None
 		self.compositor = None
@@ -764,7 +763,7 @@ class Client:
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
 			self.display = WlDisplay()
 			self.display.register_event_error()
-			self.display.connect()
+			self.socket = self.display.connect()
 			self.registry = WlRegistry(self.display)
 			self.registry.register_event_global()
 			self.display.register_request_get_registry(
@@ -995,7 +994,7 @@ def main():
 
 				while num_bytes < len(data):
 					num_bytes += (
-						client.display.socket.sendmsg(
+						client.socket.sendmsg(
 							[data[num_bytes:]],
 							auxdata
 						)
@@ -1005,13 +1004,13 @@ def main():
 			continue
 
 		rlist, _, _ = select.select(
-			[client.display.sock_fd],
+			[client.socket.fileno()],
 			[],
 			[]
 		)
 		
 		if rlist:
-			data = os.read(client.display.sock_fd, 4096)
+			data = os.read(client.socket.fileno(), 4096)
 
 			if data == b"":
 				raise Exception("Server closed connection")
