@@ -81,7 +81,7 @@ class WlDisplay:
 		self.socket.connect(path)
 		self.sock_fd = self.socket.fileno()
 
-	def calc_num_pad_bytes(self, data):
+	def pad4(self, data):
 		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
 		remainder = len(data) % 4
 		return (4 - remainder) % 4
@@ -96,7 +96,7 @@ class WlDisplay:
 			return (
 				struct.pack("=I", len(data))
 				+ data
-				+ b"\x00" * self.calc_num_pad_bytes(data)
+				+ b"\x00" * self.pad4(data)
 			)
 
 		elif arg is None:
@@ -125,22 +125,14 @@ class WlDisplay:
 				arg = args[offset:offset + arg_len]
 				decoded_args.append(arg[:-1].decode("utf-8"))
 				offset += arg_len
-				offset += self.calc_num_pad_bytes(arg)
+				offset += self.pad4(arg)
 
 		return decoded_args
 
-	def register_event(
-		self,
-		object_id,
-		opcode,
-		arg_types,
-		callback,
-		*additional_callback_args
-	):
+	def register_event(self, object_id, opcode, arg_types, callback):
 		self.event_callbacks[(object_id, opcode)] = {
 			"arg_types": arg_types,
-			"callback": callback,
-			"additional_callback_args": additional_callback_args
+			"callback": callback
 		}
 
 	def register_request(self, object_id, opcode, *args, aux=()):
@@ -150,38 +142,22 @@ class WlDisplay:
 		}
 		self.out_messages.append(msg)
 
-	def sendall(self, data, aux):
-		num_bytes_written = 0
-		auxdata = [aux] if aux else []
-
-		while num_bytes_written < len(data):
-			num_bytes_written += self.socket.sendmsg(
-				[data[num_bytes_written:]],
-				auxdata
-			)
-
+	def encode_message(self, msg):
+		encoded_args = b"".join(
+			self.encode_arg(a) for a in msg["params"][2]
+		)
+		message_size = 8 + len(encoded_args)
+		encoded_header = struct.pack(
+			"=II",
+			msg["params"][0],
+			(message_size << 16) | msg["params"][1]
+		)
+		data = encoded_header + encoded_args
 		print(f"C -> S: {data.hex()}", flush=True)
+		return data, msg["aux"]
 
-	def send_messages(self):
-		while self.out_messages:
-			msg = self.out_messages.popleft()
-			encoded_args = b"".join(
-				self.encode_arg(a) for a in msg["params"][2]
-			)
-			message_size = 8 + len(encoded_args)
-			encoded_header = struct.pack(
-				"=II",
-				msg["params"][0],
-				(message_size << 16) | msg["params"][1]
-			)
-			self.sendall(encoded_header + encoded_args, msg["aux"])
-
-	def receive_messages(self):
+	def decode_messages(self, data):
 		offset = 0
-		data = os.read(self.sock_fd, 4096)
-
-		if data == b"":
-			exit(1)
 		
 		while offset < len(data):
 			object_id, size_opcode = struct.unpack(
@@ -201,31 +177,28 @@ class WlDisplay:
 			
 			arg_types = event_cb["arg_types"]
 			callback = event_cb["callback"]
-			additional_callback_args = (
-				event_cb["additional_callback_args"]
-			)
 			decoded_args = self.decode_args(args, arg_types)
-			self.in_messages.append(
-				(
-					object_id,
-					opcode,
-					decoded_args,
-					callback,
-					additional_callback_args
-				)
-			)
+			self.in_messages.append((callback, decoded_args))
 
 	def dispatch(self):
 		while self.in_messages:
-			msg = self.in_messages.popleft()
-			(
-				object_id,
-				opcode,
-				args,
-				callback,
-				additional_callback_args
-			) = msg
-			callback(*args, *additional_callback_args)
+			callback, args = self.in_messages.popleft()
+			callback(*args)
+
+	def handle_event_error(self, object_id, code, message):
+		raise Exception(
+			f"Error: Object {object_id}, code {code}, msg {message}"
+		)
+
+	def register_event_error(self):
+		opcode = 0
+		arg_types = (int, str, int)
+		self.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_error
+		)
 		
 	def register_request_get_registry(self, new_id):
 		opcode = 1
@@ -790,6 +763,7 @@ class Client:
 	def run(self):
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
 			self.display = WlDisplay()
+			self.display.register_event_error()
 			self.display.connect()
 			self.registry = WlRegistry(self.display)
 			self.registry.register_event_global()
@@ -1013,7 +987,19 @@ def main():
 		skip_read = client.run()
 
 		if client.display.out_messages:
-			client.display.send_messages()
+			while client.display.out_messages:
+				msg = client.display.out_messages.popleft()
+				data, aux = client.display.encode_message(msg)
+				num_bytes = 0
+				auxdata = [aux] if aux else []
+
+				while num_bytes < len(data):
+					num_bytes += (
+						client.display.socket.sendmsg(
+							[data[num_bytes:]],
+							auxdata
+						)
+					)
 
 		if skip_read:
 			continue
@@ -1025,7 +1011,12 @@ def main():
 		)
 		
 		if rlist:
-			client.display.receive_messages()
+			data = os.read(client.display.sock_fd, 4096)
+
+			if data == b"":
+				raise Exception("Server closed connection")
+
+			client.display.decode_messages(data)
 			client.display.dispatch()
 
 
