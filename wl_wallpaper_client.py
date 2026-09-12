@@ -22,265 +22,39 @@ from pathlib import Path
 from PIL import Image
 
 
-class WlDisplay:
+class WlBuffer:
 	"""
-	<interface name="wl_display" version="1">
-		<request name="sync">
-			<arg name="callback" type="new_id" interface="wl_callback"/>
+	<interface name="wl_buffer" version="1">
+		<request name="destroy" type="destructor">
 		</request>
 
-		<request name="get_registry">
-			<arg name="registry" type="new_id" interface="wl_registry"/>
-		</request>
-
-		<event name="error">
-			<arg name="object_id" type="object"/>
-			<arg name="code" type="uint"/>
-			<arg name="message" type="string"/>
-		</event>
-
-		<event name="delete_id">
-			<arg name="id" type="uint" />
+		<event name="release">
 		</event>
 	</interface>
-	"""
 
-	def __init__(self):
-		self.next_object_id = 0
-		self.released_object_ids = deque()
-		self.object_id = self.get_next_object_id()
-		self.out_messages = deque()
-		self.in_messages = deque()
-		self.event_callbacks = {}
-
-	def get_next_object_id(self):
-		if self.released_object_ids:
-			return self.released_object_ids.popleft()
-
-		self.next_object_id += 1
-
-		if self.next_object_id > 0xfeffffff:
-			raise Exception("Ran out of client object ids")
-
-		return self.next_object_id
-
-	def connect(self):
-		# https://wayland-book.com/protocol-design/wire-protocol.html#transports
-		# we do not check WAYLAND_SOCKET since this client is not intended to be
-		# used as a subclient
-		runtime_dir = os.environ["XDG_RUNTIME_DIR"]
-
-		if not runtime_dir:
-			exit(1)
-		
-		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
-		path = os.path.join(runtime_dir, display)
-		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		sock.connect(path)
-		return sock
-
-	def pad4(self, data):
-		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
-		remainder = len(data) % 4
-		return (4 - remainder) % 4
-
-	def encode_arg(self, arg):
-		if isinstance(arg, int):
-			return struct.pack("=I", arg)
-
-		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
-		elif isinstance(arg, str):
-			data = arg.encode("utf-8") + b"\x00"
-			return (
-				struct.pack("=I", len(data))
-				+ data
-				+ b"\x00" * self.pad4(data)
-			)
-
-		elif arg is None:
-			return struct.pack("=I", 0)
-
-	def encode_message(self, msg):
-		encoded_args = b"".join(
-			self.encode_arg(a) for a in msg["params"][2]
-		)
-		message_size = 8 + len(encoded_args)
-		encoded_header = struct.pack(
-			"=II",
-			msg["params"][0],
-			(message_size << 16) | msg["params"][1]
-		)
-		data = encoded_header + encoded_args
-		print(f"C -> S: {data.hex()}", flush=True)
-		return data, msg["aux"]
-
-	def decode_args(self, args, arg_types):
-		offset = 0
-		decoded_args = []
-
-		for arg_type in arg_types:
-			if arg_type is int:
-				decoded_args.append(
-					struct.unpack(
-						"=I",
-						args[offset:offset + 4]
-					)[0]
-				)
-				offset += 4
-
-			elif arg_type is str:
-				arg_len = struct.unpack(
-					"=I",
-					args[offset:offset + 4]
-				)[0]
-				offset += 4
-				arg = args[offset:offset + arg_len]
-				decoded_args.append(arg[:-1].decode("utf-8"))
-				offset += arg_len
-				offset += self.pad4(arg)
-
-		return decoded_args
-
-	def decode_messages(self, data):
-		offset = 0
-		
-		while offset < len(data):
-			object_id, size_opcode = struct.unpack(
-				"=II",
-				data[offset:offset + 8]
-			)
-			size = size_opcode >> 16
-			opcode = size_opcode & 0xFFFF
-			args = data[offset + 8: offset + size]
-			print(f"S -> C: {data[offset:offset + size].hex()}", flush=True)
-			offset += size
-			event_cb = self.event_callbacks.get((object_id, opcode))
-
-			if not event_cb:
-				print(f"Ignoring object_id: {object_id}, size: {size}, opcode: {opcode}, args: {args}", flush=True)
-				continue
-			
-			arg_types = event_cb["arg_types"]
-			callback = event_cb["callback"]
-			decoded_args = self.decode_args(args, arg_types)
-			self.in_messages.append((callback, decoded_args))
-
-	def dispatch(self):
-		while self.in_messages:
-			callback, args = self.in_messages.popleft()
-			callback(*args)
-
-	def register_event(self, object_id, opcode, arg_types, callback):
-		self.event_callbacks[(object_id, opcode)] = {
-			"arg_types": arg_types,
-			"callback": callback
-		}
-
-	def register_request(self, object_id, opcode, *args, aux=()):
-		msg = {
-			"params": (object_id, opcode, args),
-			"aux": aux
-		}
-		self.out_messages.append(msg)
-
-	def handle_event_error(self, object_id, code, message):
-		raise Exception(
-			f"Error: Object {object_id}, code {code}, msg {message}"
-		)
-
-	def register_event_error(self):
-		opcode = 0
-		arg_types = (int, str, int)
-		self.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.handle_event_error
-		)
-		
-	def register_request_get_registry(self, new_id):
-		opcode = 1
-		self.register_request(self.object_id, opcode, new_id)
-
-
-class WlRegistry:
-	"""
-	<interface name="wl_registry" version="1">
-		<request name="bind">
-			<arg name="name" type="uint" summary="unique name for the object"/>
-			<arg name="id" type="new_id"/>
-		</request>
-
-		<event name="global">
-			<arg name="name" type="uint"/>
-			<arg name="interface" type="string"/>
-			<arg name="version" type="uint"/>
-		</event>
-
-		<event name="global_remove">
-			<arg name="name" type="uint"/>
-		</event>
-	</interface>
 	"""
 
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
-		self.global_remove_events = deque()
-		self.global_events = deque()
-		self.output_events = deque()
-
-	def handle_event_global(self, name, interface, version):
-		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
-		if interface == "wl_output":
-			self.output_events.append((interface, name, version))
-
-		self.global_events.append((interface, name, version))
-		
-	def register_event_global(self):
-		opcode = 0
-		arg_types = (int, str, int)
-		self.display.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.handle_event_global
-		)
-
-	def handle_event_global_remove(self, name):
-		self.global_remove_events.append(name)
-
-	def register_event_global_remove(self, name):
-		opcode = 1
-		arg_types = (int,)
-		self.display.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.handle_event_global_remove
-		)
-
-	def register_request_bind(self, name, interface, version, new_id):
-		opcode = 0
-		self.display.register_request(
-			self.object_id,
-			opcode,
-			name,
-			interface,
-			version,
-			new_id
-		)
 
 
-class WlCompositor:
+class WlShmPool:
 	"""
-	<interface name="wl_compositor" version="6">
-		<request name="create_surface">
-			<arg name="id" type="new_id" interface="wl_surface" summary="the new surface"/>
+	<interface name="wl_shm_pool" version="2">
+		<request name="create_buffer">
+			<arg name="id" type="new_id" interface="wl_buffer" summary="buffer to create"/>
+			<arg name="offset" type="int" summary="buffer byte offset within the pool"/>
+			<arg name="width" type="int" summary="buffer width, in pixels"/>
+			<arg name="height" type="int" summary="buffer height, in pixels"/>
+			<arg name="stride" type="int" summary="number of bytes from the beginning of one row to the beginning of the next row"/>
+			<arg name="format" type="uint" enum="wl_shm.format" summary="buffer pixel format"/>
 		</request>
 
-		<request name="create_region">
-			<arg name="id" type="new_id" interface="wl_region" summary="the new region"/>
+		<request name="destroy" type="destructor"/>
+
+		<request name="resize">
+			<arg name="size" type="int" summary="new size of the pool, in bytes"/>
 		</request>
 	</interface>
 	"""
@@ -288,246 +62,39 @@ class WlCompositor:
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
-		self.surfaces = []
+		self.buf_fd = -1
+		self.buf = None
 
-	def register_request_create_surface(self, new_id):
-		opcode = 0
-		self.display.register_request(self.object_id, opcode, new_id)
+	def create_shared_frame_buffer(self, size):
+		self.buf_fd = os.memfd_create("bg_frame_buffer")
+		os.ftruncate(self.buf_fd, size)
+		self.buf = mmap.mmap(
+			self.buf_fd,
+			size,
+			flags=mmap.MAP_SHARED,
+			prot=mmap.PROT_READ | mmap.PROT_WRITE,
+		)
 
-
-class ZwlrLayerShellV1:
-	"""
-	<interface name="zwlr_layer_shell_v1" version="4">
-		<request name="get_layer_surface">
-			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
-			<arg name="surface" type="object" interface="wl_surface"/>
-			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
-			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
-			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
-		</request>
-
-		<enum name="layer">
-			<entry name="background" value="0"/>
-			<entry name="bottom" value="1"/>
-			<entry name="top" value="2"/>
-			<entry name="overlay" value="3"/>
-		</enum>
-
-		<request name="destroy" type="destructor" since="3">
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.surfaces = []
-
-	def register_request_get_layer_surface(
+	def register_request_create_buffer(
 		self,
 		new_id,
-		surface,
-		output,
-		layer,
-		namespace
+		offset,
+		width,
+		height,
+		stride,
+		format
 	):
 		opcode = 0
 		self.display.register_request(
 			self.object_id,
 			opcode,
 			new_id,
-			surface,
-			output,
-			layer,
-			namespace
+			offset,
+			width,
+			height,
+			stride,
+			format
 		)
-
-
-class WlShm:
-	"""
-	<interface name="wl_shm" version="1">
-		<enum name="error">
-			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
-			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
-			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
-		</enum>
-
-		<enum name="format">
-			<!-- The drm format codes match the #defines in drm_fourcc.h.
-				The formats actually supported by the compositor will be
-				reported by the format event. -->
-		</enum>
-
-		<request name="create_pool">
-			<arg name="id" type="new_id" interface="wl_shm_pool"/>
-			<arg name="fd" type="fd"/>
-			<arg name="size" type="int"/>
-		</request>
-
-		<event name="format">
-			<arg name="format" type="uint" enum="format"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.format = 1
-
-	def register_request_create_pool(self, new_id, fd, size):
-		opcode = 0
-		aux = (
-			socket.SOL_SOCKET,
-			socket.SCM_RIGHTS,
-			struct.pack("i", fd)
-		)
-		self.display.register_request(
-			self.object_id,
-			opcode,
-			new_id,
-			size,
-			aux=aux
-		)
-
-
-class WlOutput:
-	"""
-	<interface name="wl_output" version="2">
-		<enum name="subpixel">
-			<entry name="unknown" value="0"/>
-			<entry name="none" value="1"/>
-			<entry name="horizontal_rgb" value="2"/>
-			<entry name="horizontal_bgr" value="3"/>
-			<entry name="vertical_rgb" value="4"/>
-			<entry name="vertical_bgr" value="5"/>
-		</enum>
-
-		<enum name="transform">
-			<entry name="normal" value="0"/>
-			<entry name="90" value="1"/>
-			<entry name="180" value="2"/>
-			<entry name="270" value="3"/>
-			<entry name="flipped" value="4"/>
-			<entry name="flipped_90" value="5"/>
-			<entry name="flipped_180" value="6"/>
-			<entry name="flipped_270" value="7"/>
-		</enum>
-
-		<event name="geometry">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="physical_width" type="int"/>
-			<arg name="physical_height" type="int"/>
-			<arg name="subpixel" type="int" enum="subpixel"/>
-			<arg name="make" type="string"/>
-			<arg name="model" type="string"/>
-			<arg name="transform" type="int" enum="transform"/>
-		</event>
-
-		<enum name="mode" bitfield="true">
-			<entry name="current" value="0x1"/>
-			<entry name="preferred" value="0x2"/>
-		</enum>
-
-		<event name="mode">
-			<arg name="flags" type="uint" enum="mode"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-			<arg name="refresh" type="int"/>
-		</event>
-
-		<event name="done" since="2">
-		</event>
-
-		<event name="scale" since="2">
-			<arg name="factor" type="int"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display, name):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.name = name
-
-
-class WlSurface:
-	"""
-	<interface name="wl_surface" version="4">
-		<request name="destroy" type="destructor">
-		</request>
-
-		<request name="attach">
-			<arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-		</request>
-
-		<request name="damage">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-		</request>
-
-		<request name="frame">
-			<arg name="callback" type="new_id" interface="wl_callback"/>
-		</request>
-
-		<request name="set_opaque_region">
-			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
-		</request>
-
-		<request name="set_input_region">
-			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
-		</request>
-
-		<request name="commit">
-		</request>
-
-		<event name="enter">
-			<arg name="output" type="object" interface="wl_output"/>
-		</event>
-
-		<event name="leave">
-			<arg name="output" type="object" interface="wl_output"/>
-		</event>
-
-		<request name="set_buffer_transform" since="2">
-			<arg name="transform" type="int"/>
-		</request>
-
-		<request name="set_buffer_scale" since="3">
-			<arg name="scale" type="int"/>
-		</request>
-
-		<request name="damage_buffer" since="4">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-
-	def register_request_attach(self, buffer, x, y):
-		opcode = 1
-		self.display.register_request(
-			self.object_id,
-			opcode,
-			buffer,
-			x,
-			y
-		)
-
-	def register_request_commit(self):
-		opcode = 6
-		self.display.register_request(self.object_id, opcode)
 
 
 class ZwlrLayerSurfaceV1:
@@ -660,22 +227,61 @@ class ZwlrLayerSurfaceV1:
 		self.display.register_request(self.object_id, opcode, anchor)
 
 
-class WlShmPool:
+class WlSurface:
 	"""
-	<interface name="wl_shm_pool" version="2">
-		<request name="create_buffer">
-			<arg name="id" type="new_id" interface="wl_buffer" summary="buffer to create"/>
-			<arg name="offset" type="int" summary="buffer byte offset within the pool"/>
-			<arg name="width" type="int" summary="buffer width, in pixels"/>
-			<arg name="height" type="int" summary="buffer height, in pixels"/>
-			<arg name="stride" type="int" summary="number of bytes from the beginning of one row to the beginning of the next row"/>
-			<arg name="format" type="uint" enum="wl_shm.format" summary="buffer pixel format"/>
+	<interface name="wl_surface" version="4">
+		<request name="destroy" type="destructor">
 		</request>
 
-		<request name="destroy" type="destructor"/>
+		<request name="attach">
+			<arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+		</request>
 
-		<request name="resize">
-			<arg name="size" type="int" summary="new size of the pool, in bytes"/>
+		<request name="damage">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+		</request>
+
+		<request name="frame">
+			<arg name="callback" type="new_id" interface="wl_callback"/>
+		</request>
+
+		<request name="set_opaque_region">
+			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
+		</request>
+
+		<request name="set_input_region">
+			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
+		</request>
+
+		<request name="commit">
+		</request>
+
+		<event name="enter">
+			<arg name="output" type="object" interface="wl_output"/>
+		</event>
+
+		<event name="leave">
+			<arg name="output" type="object" interface="wl_output"/>
+		</event>
+
+		<request name="set_buffer_transform" since="2">
+			<arg name="transform" type="int"/>
+		</request>
+
+		<request name="set_buffer_scale" since="3">
+			<arg name="scale" type="int"/>
+		</request>
+
+		<request name="damage_buffer" since="4">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
 		</request>
 	</interface>
 	"""
@@ -683,56 +289,450 @@ class WlShmPool:
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
-		self.buf_fd = -1
-		self.buf = None
 
-	def create_shared_frame_buffer(self, size):
-		self.buf_fd = os.memfd_create("bg_frame_buffer")
-		os.ftruncate(self.buf_fd, size)
-		self.buf = mmap.mmap(
-			self.buf_fd,
-			size,
-			flags=mmap.MAP_SHARED,
-			prot=mmap.PROT_READ | mmap.PROT_WRITE,
+	def register_request_attach(self, buffer, x, y):
+		opcode = 1
+		self.display.register_request(
+			self.object_id,
+			opcode,
+			buffer,
+			x,
+			y
 		)
 
-	def register_request_create_buffer(
+	def register_request_commit(self):
+		opcode = 6
+		self.display.register_request(self.object_id, opcode)
+
+
+class WlOutput:
+	"""
+	<interface name="wl_output" version="2">
+		<enum name="subpixel">
+			<entry name="unknown" value="0"/>
+			<entry name="none" value="1"/>
+			<entry name="horizontal_rgb" value="2"/>
+			<entry name="horizontal_bgr" value="3"/>
+			<entry name="vertical_rgb" value="4"/>
+			<entry name="vertical_bgr" value="5"/>
+		</enum>
+
+		<enum name="transform">
+			<entry name="normal" value="0"/>
+			<entry name="90" value="1"/>
+			<entry name="180" value="2"/>
+			<entry name="270" value="3"/>
+			<entry name="flipped" value="4"/>
+			<entry name="flipped_90" value="5"/>
+			<entry name="flipped_180" value="6"/>
+			<entry name="flipped_270" value="7"/>
+		</enum>
+
+		<event name="geometry">
+			<arg name="x" type="int"/>
+			<arg name="y" type="int"/>
+			<arg name="physical_width" type="int"/>
+			<arg name="physical_height" type="int"/>
+			<arg name="subpixel" type="int" enum="subpixel"/>
+			<arg name="make" type="string"/>
+			<arg name="model" type="string"/>
+			<arg name="transform" type="int" enum="transform"/>
+		</event>
+
+		<enum name="mode" bitfield="true">
+			<entry name="current" value="0x1"/>
+			<entry name="preferred" value="0x2"/>
+		</enum>
+
+		<event name="mode">
+			<arg name="flags" type="uint" enum="mode"/>
+			<arg name="width" type="int"/>
+			<arg name="height" type="int"/>
+			<arg name="refresh" type="int"/>
+		</event>
+
+		<event name="done" since="2">
+		</event>
+
+		<event name="scale" since="2">
+			<arg name="factor" type="int"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, display, name):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.name = name
+
+
+class WlShm:
+	"""
+	<interface name="wl_shm" version="1">
+		<enum name="error">
+			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
+			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
+			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
+		</enum>
+
+		<enum name="format">
+			<!-- The drm format codes match the #defines in drm_fourcc.h.
+				The formats actually supported by the compositor will be
+				reported by the format event. -->
+		</enum>
+
+		<request name="create_pool">
+			<arg name="id" type="new_id" interface="wl_shm_pool"/>
+			<arg name="fd" type="fd"/>
+			<arg name="size" type="int"/>
+		</request>
+
+		<event name="format">
+			<arg name="format" type="uint" enum="format"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, display):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.format = 1
+
+	def register_request_create_pool(self, new_id, fd, size):
+		opcode = 0
+		aux = (
+			socket.SOL_SOCKET,
+			socket.SCM_RIGHTS,
+			struct.pack("i", fd)
+		)
+		self.display.register_request(
+			self.object_id,
+			opcode,
+			new_id,
+			size,
+			aux=aux
+		)
+
+
+class ZwlrLayerShellV1:
+	"""
+	<interface name="zwlr_layer_shell_v1" version="4">
+		<request name="get_layer_surface">
+			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
+			<arg name="surface" type="object" interface="wl_surface"/>
+			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
+			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
+			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
+		</request>
+
+		<enum name="layer">
+			<entry name="background" value="0"/>
+			<entry name="bottom" value="1"/>
+			<entry name="top" value="2"/>
+			<entry name="overlay" value="3"/>
+		</enum>
+
+		<request name="destroy" type="destructor" since="3">
+		</request>
+	</interface>
+	"""
+
+	def __init__(self, display):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.surfaces = []
+
+	def register_request_get_layer_surface(
 		self,
 		new_id,
-		offset,
-		width,
-		height,
-		stride,
-		format
+		surface,
+		output,
+		layer,
+		namespace
 	):
 		opcode = 0
 		self.display.register_request(
 			self.object_id,
 			opcode,
 			new_id,
-			offset,
-			width,
-			height,
-			stride,
-			format
+			surface,
+			output,
+			layer,
+			namespace
 		)
 
 
-class WlBuffer:
+class WlCompositor:
 	"""
-	<interface name="wl_buffer" version="1">
-		<request name="destroy" type="destructor">
+	<interface name="wl_compositor" version="6">
+		<request name="create_surface">
+			<arg name="id" type="new_id" interface="wl_surface" summary="the new surface"/>
 		</request>
 
-		<event name="release">
-		</event>
+		<request name="create_region">
+			<arg name="id" type="new_id" interface="wl_region" summary="the new region"/>
+		</request>
 	</interface>
-
 	"""
 
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
+		self.surfaces = []
+
+	def register_request_create_surface(self, new_id):
+		opcode = 0
+		self.display.register_request(self.object_id, opcode, new_id)
+
+
+class WlRegistry:
+	"""
+	<interface name="wl_registry" version="1">
+		<request name="bind">
+			<arg name="name" type="uint" summary="unique name for the object"/>
+			<arg name="id" type="new_id"/>
+		</request>
+
+		<event name="global">
+			<arg name="name" type="uint"/>
+			<arg name="interface" type="string"/>
+			<arg name="version" type="uint"/>
+		</event>
+
+		<event name="global_remove">
+			<arg name="name" type="uint"/>
+		</event>
+	</interface>
+	"""
+
+	def __init__(self, display):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+		self.global_remove_events = deque()
+		self.global_events = deque()
+		self.output_events = deque()
+
+	def handle_event_global(self, name, interface, version):
+		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
+		if interface == "wl_output":
+			self.output_events.append((interface, name, version))
+
+		self.global_events.append((interface, name, version))
+		
+	def register_event_global(self):
+		opcode = 0
+		arg_types = (int, str, int)
+		self.display.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_global
+		)
+
+	def handle_event_global_remove(self, name):
+		self.global_remove_events.append(name)
+
+	def register_event_global_remove(self, name):
+		opcode = 1
+		arg_types = (int,)
+		self.display.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_global_remove
+		)
+
+	def register_request_bind(self, name, interface, version, new_id):
+		opcode = 0
+		self.display.register_request(
+			self.object_id,
+			opcode,
+			name,
+			interface,
+			version,
+			new_id
+		)
+
+
+class WlDisplay:
+	"""
+	<interface name="wl_display" version="1">
+		<request name="sync">
+			<arg name="callback" type="new_id" interface="wl_callback"/>
+		</request>
+
+		<request name="get_registry">
+			<arg name="registry" type="new_id" interface="wl_registry"/>
+		</request>
+
+		<event name="error">
+			<arg name="object_id" type="object"/>
+			<arg name="code" type="uint"/>
+			<arg name="message" type="string"/>
+		</event>
+
+		<event name="delete_id">
+			<arg name="id" type="uint" />
+		</event>
+	</interface>
+	"""
+
+	def __init__(self):
+		self.next_object_id = 0
+		self.released_object_ids = deque()
+		self.object_id = self.get_next_object_id()
+		self.out_messages = deque()
+		self.in_messages = deque()
+		self.callback_lookups = [None] * (40 * 16)
+
+	def get_next_object_id(self):
+		if self.released_object_ids:
+			return self.released_object_ids.popleft()
+
+		self.next_object_id += 1
+
+		if self.next_object_id > 0xfeffffff:
+			raise Exception("Ran out of client object ids")
+
+		return self.next_object_id
+
+	def connect(self):
+		# https://wayland-book.com/protocol-design/wire-protocol.html#transports
+		# we do not check WAYLAND_SOCKET since this client is not intended to be
+		# used as a subclient
+		runtime_dir = os.environ["XDG_RUNTIME_DIR"]
+
+		if not runtime_dir:
+			exit(1)
+		
+		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+		path = os.path.join(runtime_dir, display)
+		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		sock.connect(path)
+		return sock
+
+	def pad4(self, data):
+		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
+		remainder = len(data) % 4
+		return (4 - remainder) % 4
+
+	def encode_arg(self, arg):
+		if isinstance(arg, int):
+			return struct.pack("=I", arg)
+
+		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
+		elif isinstance(arg, str):
+			data = arg.encode("utf-8") + b"\x00"
+			return (
+				struct.pack("=I", len(data))
+				+ data
+				+ b"\x00" * self.pad4(data)
+			)
+
+		elif arg is None:
+			return struct.pack("=I", 0)
+
+	def encode_message(self, msg):
+		encoded_args = b"".join(
+			self.encode_arg(a) for a in msg["params"][2]
+		)
+		message_size = 8 + len(encoded_args)
+		encoded_header = struct.pack(
+			"=II",
+			msg["params"][0],
+			(message_size << 16) | msg["params"][1]
+		)
+		data = encoded_header + encoded_args
+		print(f"C -> S: {data.hex()}", flush=True)
+		return data, msg["aux"]
+
+	def decode_args(self, args, arg_types):
+		offset = 0
+		decoded_args = []
+
+		for arg_type in arg_types:
+			if arg_type is int:
+				decoded_args.append(
+					struct.unpack(
+						"=I",
+						args[offset:offset + 4]
+					)[0]
+				)
+				offset += 4
+
+			elif arg_type is str:
+				arg_len = struct.unpack(
+					"=I",
+					args[offset:offset + 4]
+				)[0]
+				offset += 4
+				arg = args[offset:offset + arg_len]
+				decoded_args.append(arg[:-1].decode("utf-8"))
+				offset += arg_len
+				offset += self.pad4(arg)
+
+		return decoded_args
+
+	def decode_messages(self, data):
+		offset = 0
+		
+		while offset < len(data):
+			object_id, size_opcode = struct.unpack(
+				"=II",
+				data[offset:offset + 8]
+			)
+			size = size_opcode >> 16
+			opcode = size_opcode & 0xFFFF
+			args = data[offset + 8: offset + size]
+			print(f"S -> C: {data[offset:offset + size].hex()}", flush=True)
+			offset += size
+			lookup = self.callback_lookups[
+				(object_id << 4) | opcode
+			]
+
+			if not lookup:
+				print(f"Ignoring object_id: {object_id}, size: {size}, opcode: {opcode}, args: {args}", flush=True)
+				continue
+			
+			decoded_args = self.decode_args(args, lookup[1])
+			self.in_messages.append((lookup[0], decoded_args))
+
+	def dispatch(self):
+		while self.in_messages:
+			callback, args = self.in_messages.popleft()
+			callback(*args)
+
+	def register_event(self, object_id, opcode, arg_types, callback):
+		self.callback_lookups[(object_id << 4) | opcode] = (
+			callback,
+			arg_types
+		)
+
+	def register_request(self, object_id, opcode, *args, aux=()):
+		msg = {
+			"params": (object_id, opcode, args),
+			"aux": aux
+		}
+		self.out_messages.append(msg)
+
+	def handle_event_error(self, object_id, code, message):
+		raise Exception(
+			f"Error: Object {object_id}, code {code}, msg {message}"
+		)
+
+	def register_event_error(self):
+		opcode = 0
+		arg_types = (int, str, int)
+		self.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.handle_event_error
+		)
+		
+	def register_request_get_registry(self, new_id):
+		opcode = 1
+		self.register_request(self.object_id, opcode, new_id)
 
 
 class Client:
