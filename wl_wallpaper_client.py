@@ -797,6 +797,43 @@ class WlDisplay:
 		opcode = 1
 		self.schedule_request(self.object_id, opcode, new_id)
 
+	def run_event_loop(self, step):
+		while True:
+			skip_read = step()
+
+			if self.out_messages:
+				while self.out_messages:
+					msg = self.out_messages.popleft()
+					data, aux = self.encode_message(msg)
+					num_bytes = 0
+					auxdata = [aux] if aux else []
+
+					while num_bytes < len(data):
+						num_bytes += (
+							self.socket.sendmsg(
+								[data[num_bytes:]],
+								auxdata
+							)
+						)
+
+			if skip_read:
+				continue
+
+			rlist, _, _ = select.select(
+				[self.socket.fileno()],
+				[],
+				[]
+			)
+			
+			if rlist:
+				data = os.read(self.socket.fileno(), 4096)
+
+				if data == b"":
+					raise Exception("Server closed connection")
+
+				self.decode_messages(data)
+				self.dispatch()
+
 
 class Client:
 	class State(Enum):
@@ -808,14 +845,13 @@ class Client:
 		SET_BUFFER = 6
 		SET_FIRST_RENDER = 7
 
-	def __init__(self):
+	def __init__(self, display):
 		self.state = self.State.CREATE_DISPLAY_REGISTRY
-		self.display = None
+		self.display = display
 		self.outputs = deque()
 		
 	def run(self):
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
-			self.display = WlDisplay()
 			self.display.register_event_error()
 			self.display.register_event_delete_id()
 			self.display.connect()
@@ -1047,43 +1083,9 @@ class Client:
 			
 
 def main():
-	client = Client()
-
-	while True:
-		skip_read = client.run()
-
-		if client.display.out_messages:
-			while client.display.out_messages:
-				msg = client.display.out_messages.popleft()
-				data, aux = client.display.encode_message(msg)
-				num_bytes = 0
-				auxdata = [aux] if aux else []
-
-				while num_bytes < len(data):
-					num_bytes += (
-						client.display.socket.sendmsg(
-							[data[num_bytes:]],
-							auxdata
-						)
-					)
-
-		if skip_read:
-			continue
-
-		rlist, _, _ = select.select(
-			[client.display.socket.fileno()],
-			[],
-			[]
-		)
-		
-		if rlist:
-			data = os.read(client.display.socket.fileno(), 4096)
-
-			if data == b"":
-				raise Exception("Server closed connection")
-
-			client.display.decode_messages(data)
-			client.display.dispatch()
+	wl_display = WlDisplay()
+	client = Client(wl_display)
+	wl_display.run_event_loop(client.run)
 
 
 if __name__ == "__main__":
