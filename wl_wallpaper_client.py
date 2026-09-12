@@ -765,6 +765,13 @@ class WlDisplay:
 		)
 
 	def on_event_delete_id(self, id):
+		del_key = None
+
+		for k, v in self.objects.items():
+			if v.object_id == id:
+				del_key = k
+
+		del self.objects[del_key]
 		self.released_object_ids.append(id)
 		print(f"Released object_id: {id}")
 
@@ -830,9 +837,11 @@ class Client:
 			print(f"WlCallback created {self.display.objects["wl_callback_registry"].object_id}", flush=True)
 			self.state = self.State.CREATE_GLOBALS
 			print(f"WlRegistry created {self.display.objects["wl_registry"].object_id}", flush=True)
+			print(f"Objects: {self.display.objects}", flush=True)
 			return False
 		
 		elif self.state == self.State.CREATE_GLOBALS:
+			print(f"Objects: {self.display.objects}", flush=True)
 			for _ in range(len(self.display.objects["wl_registry"].global_events)):
 				iface, name, version = (
 					self.display.objects["wl_registry"].global_events.popleft()
