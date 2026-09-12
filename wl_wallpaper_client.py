@@ -75,7 +75,7 @@ class WlShmPool:
 			prot=mmap.PROT_READ | mmap.PROT_WRITE,
 		)
 
-	def register_request_create_buffer(
+	def schedule_request_create_buffer(
 		self,
 		new_id,
 		offset,
@@ -85,7 +85,7 @@ class WlShmPool:
 		format
 	):
 		opcode = 0
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -190,7 +190,7 @@ class ZwlrLayerSurfaceV1:
 		self.size = 0
 		self.serial = -1
 
-	def handle_event_configure(self, serial, width, height):
+	def on_event_configure(self, serial, width, height):
 		self.configured = True
 		self.width = width
 		self.height = height
@@ -206,25 +206,25 @@ class ZwlrLayerSurfaceV1:
 			self.object_id,
 			opcode,
 			arg_types,
-			self.handle_event_configure
+			self.on_event_configure
 		)
 
 	def reqister_request_ack_configure(self, serial):
 		opcode = 6
-		self.display.register_request(self.object_id, opcode, serial)
+		self.display.schedule_request(self.object_id, opcode, serial)
 
-	def register_request_set_size(self, width, height):
+	def schedule_request_set_size(self, width, height):
 		opcode = 0
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			width,
 			height
 		)
 
-	def register_request_set_anchor(self, anchor):
+	def schedule_request_set_anchor(self, anchor):
 		opcode = 1
-		self.display.register_request(self.object_id, opcode, anchor)
+		self.display.schedule_request(self.object_id, opcode, anchor)
 
 
 class WlSurface:
@@ -290,9 +290,9 @@ class WlSurface:
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
 
-	def register_request_attach(self, buffer, x, y):
+	def schedule_request_attach(self, buffer, x, y):
 		opcode = 1
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			buffer,
@@ -300,9 +300,9 @@ class WlSurface:
 			y
 		)
 
-	def register_request_commit(self):
+	def schedule_request_commit(self):
 		opcode = 6
-		self.display.register_request(self.object_id, opcode)
+		self.display.schedule_request(self.object_id, opcode)
 
 
 class WlOutput:
@@ -398,14 +398,14 @@ class WlShm:
 		self.object_id = self.display.get_next_object_id()
 		self.format = 1
 
-	def register_request_create_pool(self, new_id, fd, size):
+	def schedule_request_create_pool(self, new_id, fd, size):
 		opcode = 0
 		aux = (
 			socket.SOL_SOCKET,
 			socket.SCM_RIGHTS,
 			struct.pack("i", fd)
 		)
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -442,7 +442,7 @@ class ZwlrLayerShellV1:
 		self.object_id = self.display.get_next_object_id()
 		self.surfaces = []
 
-	def register_request_get_layer_surface(
+	def schedule_request_get_layer_surface(
 		self,
 		new_id,
 		surface,
@@ -451,7 +451,7 @@ class ZwlrLayerShellV1:
 		namespace
 	):
 		opcode = 0
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			new_id,
@@ -480,9 +480,32 @@ class WlCompositor:
 		self.object_id = self.display.get_next_object_id()
 		self.surfaces = []
 
-	def register_request_create_surface(self, new_id):
+	def schedule_request_create_surface(self, new_id):
 		opcode = 0
-		self.display.register_request(self.object_id, opcode, new_id)
+		self.display.schedule_request(self.object_id, opcode, new_id)
+
+
+class WlCallback:
+	"""
+	<interface name="wl_callback" version="1">
+		<event name="done">
+			<arg name="callback_data" type="uint" summary="request-specific data for the wl_callback"/>
+		</event>
+	</interface>
+	"""
+	def __init__(self, display):
+		self.display = display
+		self.object_id = self.display.get_next_object_id()
+
+	def register_event_done(self, on_done):
+		opcode = 0
+		arg_types = (int,)
+		self.display.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			on_done
+		)
 
 
 class WlRegistry:
@@ -511,8 +534,13 @@ class WlRegistry:
 		self.global_remove_events = deque()
 		self.global_events = deque()
 		self.output_events = deque()
+		self.done = False
 
-	def handle_event_global(self, name, interface, version):
+	def on_event_done(self, callback_data):
+		self.done = True
+		print(f"Received registry done")
+
+	def on_event_global(self, name, interface, version):
 		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
 		if interface == "wl_output":
 			self.output_events.append((interface, name, version))
@@ -526,10 +554,10 @@ class WlRegistry:
 			self.object_id,
 			opcode,
 			arg_types,
-			self.handle_event_global
+			self.on_event_global
 		)
 
-	def handle_event_global_remove(self, name):
+	def on_event_global_remove(self, name):
 		self.global_remove_events.append(name)
 
 	def register_event_global_remove(self, name):
@@ -539,12 +567,12 @@ class WlRegistry:
 			self.object_id,
 			opcode,
 			arg_types,
-			self.handle_event_global_remove
+			self.on_event_global_remove
 		)
 
-	def register_request_bind(self, name, interface, version, new_id):
+	def schedule_request_bind(self, name, interface, version, new_id):
 		opcode = 0
-		self.display.register_request(
+		self.display.schedule_request(
 			self.object_id,
 			opcode,
 			name,
@@ -708,14 +736,14 @@ class WlDisplay:
 			arg_types
 		)
 
-	def register_request(self, object_id, opcode, *args, aux=()):
+	def schedule_request(self, object_id, opcode, *args, aux=()):
 		msg = {
 			"params": (object_id, opcode, args),
 			"aux": aux
 		}
 		self.out_messages.append(msg)
 
-	def handle_event_error(self, object_id, code, message):
+	def on_event_error(self, object_id, code, message):
 		raise Exception(
 			f"Error: Object {object_id}, code {code}, msg {message}"
 		)
@@ -727,12 +755,20 @@ class WlDisplay:
 			self.object_id,
 			opcode,
 			arg_types,
-			self.handle_event_error
+			self.on_event_error
+		)
+
+	def schedule_request_sync(self, new_id):
+		opcode = 0
+		self.schedule_request(
+			self.object_id,
+			opcode,
+			new_id
 		)
 		
-	def register_request_get_registry(self, new_id):
+	def schedule_request_get_registry(self, new_id):
 		opcode = 1
-		self.register_request(self.object_id, opcode, new_id)
+		self.schedule_request(self.object_id, opcode, new_id)
 
 
 class Client:
@@ -750,6 +786,7 @@ class Client:
 		self.socket = None
 		self.display = None
 		self.registry = None
+		self.registry_sync_callback = None
 		self.compositor = None
 		self.shm = None
 		self.layer_shell = None
@@ -766,8 +803,17 @@ class Client:
 			self.socket = self.display.connect()
 			self.registry = WlRegistry(self.display)
 			self.registry.register_event_global()
-			self.display.register_request_get_registry(
+			self.display.schedule_request_get_registry(
 				self.registry.object_id
+			)
+			self.registry_sync_callback = WlCallback(
+				self.display
+			)
+			self.registry_sync_callback.register_event_done(
+				self.registry.on_event_done
+			)
+			self.display.schedule_request_sync(
+				self.registry_sync_callback.object_id
 			)
 			self.state = self.State.CREATE_GLOBALS
 			print(f"WlRegistry created", flush=True)
@@ -783,7 +829,7 @@ class Client:
 					self.compositor = WlCompositor(
 						self.display
 					)
-					self.registry.register_request_bind(
+					self.registry.schedule_request_bind(
 						name,
 						iface,
 						version,
@@ -795,7 +841,7 @@ class Client:
 					self.layer_shell = ZwlrLayerShellV1(
 						self.display
 					)
-					self.registry.register_request_bind(
+					self.registry.schedule_request_bind(
 						name,
 						iface,
 						version,
@@ -807,7 +853,7 @@ class Client:
 					self.shm = WlShm(
 						self.display
 					)
-					self.registry.register_request_bind(
+					self.registry.schedule_request_bind(
 						name,
 						iface,
 						version,
@@ -815,7 +861,7 @@ class Client:
 					)
 					print(f"Shm created", flush=True)
 
-			if self.compositor and self.layer_shell and self.shm:
+			if self.registry.done:
 				self.state = self.State.HANDLE_OUTPUTS
 
 			return False
@@ -845,7 +891,7 @@ class Client:
 				)
 				output = WlOutput(self.display, name)
 				self.outputs.append(output)
-				self.registry.register_request_bind(
+				self.registry.schedule_request_bind(
 					name,
 					iface,
 					version,
@@ -853,13 +899,13 @@ class Client:
 				)
 
 			self.surface = WlSurface(self.display)
-			self.compositor.register_request_create_surface(
+			self.compositor.schedule_request_create_surface(
 				self.surface.object_id
 			)
 			print(f"WlSurface created", flush=True)
 
 			self.layer_surface = ZwlrLayerSurfaceV1(self.display)
-			self.layer_shell.register_request_get_layer_surface(
+			self.layer_shell.schedule_request_get_layer_surface(
 				self.layer_surface.object_id,
 				self.surface.object_id,
 				None,
@@ -869,17 +915,17 @@ class Client:
 			print(f"LayerSurface created", flush=True)
 
 			self.layer_surface.register_event_configure()
-			self.layer_surface.register_request_set_size(
+			self.layer_surface.schedule_request_set_size(
 				0,
 				0
 			)
-			self.layer_surface.register_request_set_anchor(
+			self.layer_surface.schedule_request_set_anchor(
 				self.layer_surface.Anchor.TOP
 				| self.layer_surface.Anchor.BOTTOM
 				| self.layer_surface.Anchor.LEFT
 				| self.layer_surface.Anchor.RIGHT
 			)
-			self.surface.register_request_commit()
+			self.surface.schedule_request_commit()
 			self.state = self.State.FIRST_SURFACE_COMMIT
 			print(f"Commited surface", flush=True)
 			return False
@@ -898,7 +944,7 @@ class Client:
 			self.shm_pool.create_shared_frame_buffer(
 				self.layer_surface.size
 			)
-			self.shm.register_request_create_pool(
+			self.shm.schedule_request_create_pool(
 				self.shm_pool.object_id,
 				self.shm_pool.buf_fd,
 				self.layer_surface.size,
@@ -909,7 +955,7 @@ class Client:
 
 		elif self.state == self.State.SET_SHM_POOL:
 			self.buffer = WlBuffer(self.display)
-			self.shm_pool.register_request_create_buffer(
+			self.shm_pool.schedule_request_create_buffer(
 				self.buffer.object_id,
 				0,
 				self.layer_surface.width,
@@ -956,12 +1002,12 @@ class Client:
 
 			image_bytes_xrgb = image.tobytes("raw", "BGRX")
 			self.shm_pool.buf[:] = image_bytes_xrgb
-			self.surface.register_request_attach(
+			self.surface.schedule_request_attach(
 				self.buffer.object_id,
 				0,
 				0
 			)
-			self.surface.register_request_commit()
+			self.surface.schedule_request_commit()
 			self.state = self.State.SET_BUFFER
 			print(f"Buffer created adn attached", flush=True)
 			return False
