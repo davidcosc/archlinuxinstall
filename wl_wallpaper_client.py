@@ -440,7 +440,6 @@ class ZwlrLayerShellV1:
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
-		self.surfaces = []
 
 	def schedule_request_get_layer_surface(
 		self,
@@ -478,7 +477,6 @@ class WlCompositor:
 	def __init__(self, display):
 		self.display = display
 		self.object_id = self.display.get_next_object_id()
-		self.surfaces = []
 
 	def schedule_request_create_surface(self, new_id):
 		opcode = 0
@@ -616,6 +614,7 @@ class WlDisplay:
 		self.next_object_id = 0
 		self.released_object_ids = deque()
 		self.object_id = self.get_next_object_id()
+		self.objects = {}
 		self.out_messages = deque()
 		self.in_messages = deque()
 		self.callback_lookups = [None] * (40 * 16)
@@ -806,16 +805,7 @@ class Client:
 		self.state = self.State.CREATE_DISPLAY_REGISTRY
 		self.socket = None
 		self.display = None
-		self.registry = None
-		self.registry_sync_callback = None
-		self.compositor = None
-		self.shm = None
-		self.layer_shell = None
 		self.outputs = deque()
-		self.surface = None
-		self.layer_surface = None
-		self.shm_pool = None
-		self.buffer = None
 		
 	def run(self):
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
@@ -823,77 +813,77 @@ class Client:
 			self.display.register_event_error()
 			self.display.register_event_delete_id()
 			self.socket = self.display.connect()
-			self.registry = WlRegistry(self.display)
-			self.registry.register_event_global()
+			self.display.objects["wl_registry"] = WlRegistry(self.display)
+			self.display.objects["wl_registry"].register_event_global()
 			self.display.schedule_request_get_registry(
-				self.registry.object_id
+				self.display.objects["wl_registry"].object_id
 			)
-			self.registry_sync_callback = WlCallback(
+			self.display.objects["wl_callback_registry"] = WlCallback(
 				self.display
 			)
-			self.registry_sync_callback.register_event_done(
-				self.registry.on_event_done
+			self.display.objects["wl_callback_registry"].register_event_done(
+				self.display.objects["wl_registry"].on_event_done
 			)
 			self.display.schedule_request_sync(
-				self.registry_sync_callback.object_id
+				self.display.objects["wl_callback_registry"].object_id
 			)
-			print(f"WlCallback created {self.registry_sync_callback.object_id}", flush=True)
+			print(f"WlCallback created {self.display.objects["wl_callback_registry"].object_id}", flush=True)
 			self.state = self.State.CREATE_GLOBALS
-			print(f"WlRegistry created {self.registry.object_id}", flush=True)
+			print(f"WlRegistry created {self.display.objects["wl_registry"].object_id}", flush=True)
 			return False
 		
 		elif self.state == self.State.CREATE_GLOBALS:
-			for _ in range(len(self.registry.global_events)):
+			for _ in range(len(self.display.objects["wl_registry"].global_events)):
 				iface, name, version = (
-					self.registry.global_events.popleft()
+					self.display.objects["wl_registry"].global_events.popleft()
 				)
 
 				if iface == "wl_compositor":
-					self.compositor = WlCompositor(
+					self.display.objects["wl_compositor"] = WlCompositor(
 						self.display
 					)
-					self.registry.schedule_request_bind(
+					self.display.objects["wl_registry"].schedule_request_bind(
 						name,
 						iface,
 						version,
-						self.compositor.object_id
+						self.display.objects["wl_compositor"].object_id
 					)
-					print(f"WlCompositor created {self.compositor.object_id}", flush=True)
+					print(f"WlCompositor created {self.display.objects["wl_compositor"].object_id}", flush=True)
 
 				elif iface == "zwlr_layer_shell_v1":
-					self.layer_shell = ZwlrLayerShellV1(
+					self.display.objects["zwlr_layer_shell_v1"] = ZwlrLayerShellV1(
 						self.display
 					)
-					self.registry.schedule_request_bind(
+					self.display.objects["wl_registry"].schedule_request_bind(
 						name,
 						iface,
 						version,
-						self.layer_shell.object_id
+						self.display.objects["zwlr_layer_shell_v1"].object_id
 					)
-					print(f"ZwlrLayerShellV1 created {self.layer_shell.object_id}", flush=True)
+					print(f"ZwlrLayerShellV1 created {self.display.objects["zwlr_layer_shell_v1"].object_id}", flush=True)
 
 				elif iface == "wl_shm":
-					self.shm = WlShm(
+					self.display.objects["wl_shm"] = WlShm(
 						self.display
 					)
-					self.registry.schedule_request_bind(
+					self.display.objects["wl_registry"].schedule_request_bind(
 						name,
 						iface,
 						version,
-						self.shm.object_id
+						self.display.objects["wl_shm"].object_id
 					)
-					print(f"Shm created {self.shm.object_id}", flush=True)
+					print(f"Shm created {self.display.objects["wl_shm"].object_id}", flush=True)
 
-			if self.registry.done:
+			if self.display.objects["wl_registry"].done:
 				self.state = self.State.HANDLE_OUTPUTS
 
 			return False
 
 		elif self.state == self.State.HANDLE_OUTPUTS:
 			# destroy removed outputs
-			for _ in range(len(self.registry.global_remove_events)):
+			for _ in range(len(self.display.objects["wl_registry"].global_remove_events)):
 				name = (
-					self.registry.global_remove_events
+					self.display.objects["wl_registry"].global_remove_events
 					.popleft()
 				)
 				removed_output = None
@@ -908,83 +898,83 @@ class Client:
 				# surfaces, buffers etc?
 
 			# create new outputs
-			for _ in range(len(self.registry.output_events)):
+			for _ in range(len(self.display.objects["wl_registry"].output_events)):
 				iface, name, version = (
-					self.registry.output_events.popleft()
+					self.display.objects["wl_registry"].output_events.popleft()
 				)
 				output = WlOutput(self.display, name)
 				self.outputs.append(output)
-				self.registry.schedule_request_bind(
+				self.display.objects["wl_registry"].schedule_request_bind(
 					name,
 					iface,
 					version,
 					output.object_id
 				)
 
-			self.surface = WlSurface(self.display)
-			self.compositor.schedule_request_create_surface(
-				self.surface.object_id
+			self.display.objects["wl_surface"] = WlSurface(self.display)
+			self.display.objects["wl_compositor"].schedule_request_create_surface(
+				self.display.objects["wl_surface"].object_id
 			)
-			print(f"WlSurface created {self.surface.object_id}", flush=True)
+			print(f"WlSurface created {self.display.objects["wl_surface"].object_id}", flush=True)
 
-			self.layer_surface = ZwlrLayerSurfaceV1(self.display)
-			self.layer_shell.schedule_request_get_layer_surface(
-				self.layer_surface.object_id,
-				self.surface.object_id,
+			self.display.objects["zwlr_layer_surface_v1"] = ZwlrLayerSurfaceV1(self.display)
+			self.display.objects["zwlr_layer_shell_v1"].schedule_request_get_layer_surface(
+				self.display.objects["zwlr_layer_surface_v1"].object_id,
+				self.display.objects["wl_surface"].object_id,
 				None,
 				0,
 				"wallpaper"
 			)
-			print(f"LayerSurface created {self.layer_surface.object_id}", flush=True)
+			print(f"LayerSurface created {self.display.objects["zwlr_layer_surface_v1"].object_id}", flush=True)
 
-			self.layer_surface.register_event_configure()
-			self.layer_surface.schedule_request_set_size(
+			self.display.objects["zwlr_layer_surface_v1"].register_event_configure()
+			self.display.objects["zwlr_layer_surface_v1"].schedule_request_set_size(
 				0,
 				0
 			)
-			self.layer_surface.schedule_request_set_anchor(
-				self.layer_surface.Anchor.TOP
-				| self.layer_surface.Anchor.BOTTOM
-				| self.layer_surface.Anchor.LEFT
-				| self.layer_surface.Anchor.RIGHT
+			self.display.objects["zwlr_layer_surface_v1"].schedule_request_set_anchor(
+				self.display.objects["zwlr_layer_surface_v1"].Anchor.TOP
+				| self.display.objects["zwlr_layer_surface_v1"].Anchor.BOTTOM
+				| self.display.objects["zwlr_layer_surface_v1"].Anchor.LEFT
+				| self.display.objects["zwlr_layer_surface_v1"].Anchor.RIGHT
 			)
-			self.surface.schedule_request_commit()
+			self.display.objects["wl_surface"].schedule_request_commit()
 			self.state = self.State.FIRST_SURFACE_COMMIT
 			print(f"Commited surface", flush=True)
 			return False
 		
 		elif self.state == self.State.FIRST_SURFACE_COMMIT:
-			if not self.layer_surface.configured:
+			if not self.display.objects["zwlr_layer_surface_v1"].configured:
 				return False
 			
-			self.layer_surface.configured = False
-			self.layer_surface.reqister_request_ack_configure(
-				self.layer_surface.serial
+			self.display.objects["zwlr_layer_surface_v1"].configured = False
+			self.display.objects["zwlr_layer_surface_v1"].reqister_request_ack_configure(
+				self.display.objects["zwlr_layer_surface_v1"].serial
 			)
 			print("Acked configure", flush=True)
 
-			self.shm_pool = WlShmPool(self.display)
-			self.shm_pool.create_shared_frame_buffer(
-				self.layer_surface.size
+			self.display.objects["wl_shm_pool"] = WlShmPool(self.display)
+			self.display.objects["wl_shm_pool"].create_shared_frame_buffer(
+				self.display.objects["zwlr_layer_surface_v1"].size
 			)
-			self.shm.schedule_request_create_pool(
-				self.shm_pool.object_id,
-				self.shm_pool.buf_fd,
-				self.layer_surface.size,
+			self.display.objects["wl_shm"].schedule_request_create_pool(
+				self.display.objects["wl_shm_pool"].object_id,
+				self.display.objects["wl_shm_pool"].buf_fd,
+				self.display.objects["zwlr_layer_surface_v1"].size,
 			)
 			self.state = self.State.SET_SHM_POOL
-			print(f"Shm pool with frame buffer created {self.shm_pool.object_id}", flush=True)
+			print(f"Shm pool with frame buffer created {self.display.objects["wl_shm_pool"].object_id}", flush=True)
 			return True
 
 		elif self.state == self.State.SET_SHM_POOL:
-			self.buffer = WlBuffer(self.display)
-			self.shm_pool.schedule_request_create_buffer(
-				self.buffer.object_id,
+			self.display.objects["wl_buffer"] = WlBuffer(self.display)
+			self.display.objects["wl_shm_pool"].schedule_request_create_buffer(
+				self.display.objects["wl_buffer"].object_id,
 				0,
-				self.layer_surface.width,
-				self.layer_surface.height,
-				self.layer_surface.stride,
-				self.shm.format
+				self.display.objects["zwlr_layer_surface_v1"].width,
+				self.display.objects["zwlr_layer_surface_v1"].height,
+				self.display.objects["zwlr_layer_surface_v1"].stride,
+				self.display.objects["wl_shm"].format
 			)
 
 			def resize_cover(path, width, height):
@@ -1019,29 +1009,29 @@ class Client:
 			user = users[0].name
 			image = resize_cover(
 				f"/home/{user}/wall1.jpg",
-				self.layer_surface.width,
-				self.layer_surface.height
+				self.display.objects["zwlr_layer_surface_v1"].width,
+				self.display.objects["zwlr_layer_surface_v1"].height
 			)
 
 			image_bytes_xrgb = image.tobytes("raw", "BGRX")
-			self.shm_pool.buf[:] = image_bytes_xrgb
-			self.surface.schedule_request_attach(
-				self.buffer.object_id,
+			self.display.objects["wl_shm_pool"].buf[:] = image_bytes_xrgb
+			self.display.objects["wl_surface"].schedule_request_attach(
+				self.display.objects["wl_buffer"].object_id,
 				0,
 				0
 			)
-			self.surface.schedule_request_commit()
+			self.display.objects["wl_surface"].schedule_request_commit()
 			self.state = self.State.SET_BUFFER
-			print(f"Buffer created adn attached {self.buffer.object_id}", flush=True)
+			print(f"Buffer created and attached {self.display.objects["wl_buffer"].object_id}", flush=True)
 			return False
 
 		elif self.state == self.State.SET_BUFFER:
-			if not self.layer_surface.configured:
+			if not self.display.objects["zwlr_layer_surface_v1"].configured:
 				return False
 
-			self.layer_surface.configured = False
-			self.layer_surface.reqister_request_ack_configure(
-				self.layer_surface.serial
+			self.display.objects["zwlr_layer_surface_v1"].configured = False
+			self.display.objects["zwlr_layer_surface_v1"].reqister_request_ack_configure(
+				self.display.objects["zwlr_layer_surface_v1"].serial
 			)
 			self.state = self.State.SET_FIRST_RENDER
 			print("Acked configure", flush=True)
