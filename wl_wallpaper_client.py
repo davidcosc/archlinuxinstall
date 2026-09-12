@@ -611,6 +611,7 @@ class WlDisplay:
 	"""
 
 	def __init__(self):
+		self.socket = None
 		self.next_object_id = 0
 		self.released_object_ids = deque()
 		self.object_id = self.get_next_object_id()
@@ -641,9 +642,8 @@ class WlDisplay:
 		
 		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
 		path = os.path.join(runtime_dir, display)
-		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		sock.connect(path)
-		return sock
+		self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		self.socket.connect(path)
 
 	def pad4(self, data):
 		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
@@ -810,7 +810,6 @@ class Client:
 
 	def __init__(self):
 		self.state = self.State.CREATE_DISPLAY_REGISTRY
-		self.socket = None
 		self.display = None
 		self.outputs = deque()
 		
@@ -819,7 +818,7 @@ class Client:
 			self.display = WlDisplay()
 			self.display.register_event_error()
 			self.display.register_event_delete_id()
-			self.socket = self.display.connect()
+			self.display.connect()
 			self.display.objects["wl_registry"] = WlRegistry(self.display)
 			self.display.objects["wl_registry"].register_event_global()
 			self.display.schedule_request_get_registry(
@@ -1062,7 +1061,7 @@ def main():
 
 				while num_bytes < len(data):
 					num_bytes += (
-						client.socket.sendmsg(
+						client.display.socket.sendmsg(
 							[data[num_bytes:]],
 							auxdata
 						)
@@ -1072,13 +1071,13 @@ def main():
 			continue
 
 		rlist, _, _ = select.select(
-			[client.socket.fileno()],
+			[client.display.socket.fileno()],
 			[],
 			[]
 		)
 		
 		if rlist:
-			data = os.read(client.socket.fileno(), 4096)
+			data = os.read(client.display.socket.fileno(), 4096)
 
 			if data == b"":
 				raise Exception("Server closed connection")
