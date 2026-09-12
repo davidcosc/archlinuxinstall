@@ -616,6 +616,7 @@ class WlDisplay:
 		self.released_object_ids = deque()
 		self.object_id = self.get_next_object_id()
 		self.objects = {}
+		self.tasks = deque()
 		self.out_messages = deque()
 		self.in_messages = deque()
 		self.callback_lookups = [None] * (40 * 16)
@@ -797,8 +798,15 @@ class WlDisplay:
 		opcode = 1
 		self.schedule_request(self.object_id, opcode, new_id)
 
+	def schedule_task(self, task):
+		self.tasks.append(task)
+
 	def run_event_loop(self, step):
 		while True:
+			if self.tasks:
+				task = self.tasks.popleft()
+				task()
+
 			skip_read = step()
 
 			if self.out_messages:
@@ -837,45 +845,42 @@ class WlDisplay:
 
 class Client:
 	class State(Enum):
-		CREATE_DISPLAY_REGISTRY = 1
-		CREATE_GLOBALS = 2
-		HANDLE_OUTPUTS = 3
-		FIRST_SURFACE_COMMIT = 4
-		SET_SHM_POOL = 5
-		SET_BUFFER = 6
-		SET_FIRST_RENDER = 7
+		CREATE_GLOBALS = 1
+		HANDLE_OUTPUTS = 2
+		FIRST_SURFACE_COMMIT = 3
+		SET_SHM_POOL = 4
+		SET_BUFFER = 5
+		SET_FIRST_RENDER = 6
 
 	def __init__(self, display):
-		self.state = self.State.CREATE_DISPLAY_REGISTRY
+		self.state = self.State.CREATE_GLOBALS
 		self.display = display
 		self.outputs = deque()
+
+	def setup_base_interfaces(self):
+		self.display.register_event_error()
+		self.display.register_event_delete_id()
+		self.display.connect()
+		self.display.objects["wl_registry"] = WlRegistry(self.display)
+		self.display.objects["wl_registry"].register_event_global()
+		self.display.schedule_request_get_registry(
+			self.display.objects["wl_registry"].object_id
+		)
+		self.display.objects["wl_callback_registry"] = WlCallback(
+			self.display
+		)
+		self.display.objects["wl_callback_registry"].register_event_done(
+			self.display.objects["wl_registry"].on_event_done
+		)
+		self.display.schedule_request_sync(
+			self.display.objects["wl_callback_registry"].object_id
+		)
+		print(f"WlCallback created {self.display.objects["wl_callback_registry"].object_id}", flush=True)
+		print(f"WlRegistry created {self.display.objects["wl_registry"].object_id}", flush=True)
+		print(f"Objects: {self.display.objects}", flush=True)
 		
 	def run(self):
-		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
-			self.display.register_event_error()
-			self.display.register_event_delete_id()
-			self.display.connect()
-			self.display.objects["wl_registry"] = WlRegistry(self.display)
-			self.display.objects["wl_registry"].register_event_global()
-			self.display.schedule_request_get_registry(
-				self.display.objects["wl_registry"].object_id
-			)
-			self.display.objects["wl_callback_registry"] = WlCallback(
-				self.display
-			)
-			self.display.objects["wl_callback_registry"].register_event_done(
-				self.display.objects["wl_registry"].on_event_done
-			)
-			self.display.schedule_request_sync(
-				self.display.objects["wl_callback_registry"].object_id
-			)
-			print(f"WlCallback created {self.display.objects["wl_callback_registry"].object_id}", flush=True)
-			self.state = self.State.CREATE_GLOBALS
-			print(f"WlRegistry created {self.display.objects["wl_registry"].object_id}", flush=True)
-			print(f"Objects: {self.display.objects}", flush=True)
-			return False
-		
-		elif self.state == self.State.CREATE_GLOBALS:
+		if self.state == self.State.CREATE_GLOBALS:
 			print(f"Objects: {self.display.objects}", flush=True)
 			for _ in range(len(self.display.objects["wl_registry"].global_events)):
 				iface, name, version = (
@@ -1085,6 +1090,7 @@ class Client:
 def main():
 	wl_display = WlDisplay()
 	client = Client(wl_display)
+	wl_display.schedule_task(client.setup_base_interfaces)
 	wl_display.run_event_loop(client.run)
 
 
