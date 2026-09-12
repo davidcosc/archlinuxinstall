@@ -600,6 +600,13 @@ class WlDisplay:
 		</event>
 
 		<event name="delete_id">
+			<description summary="acknowledge object ID deletion">
+				This event is used internally by the object ID management
+				logic.  When a client deletes an object, the server will send
+				this event to acknowledge that it has seen the delete request.
+				When the client receive this event, it will know that it can
+				safely reuse the object ID.
+			</description>
 			<arg name="id" type="uint" />
 		</event>
 	</interface>
@@ -750,12 +757,26 @@ class WlDisplay:
 
 	def register_event_error(self):
 		opcode = 0
-		arg_types = (int, str, int)
+		arg_types = (int, int, str)
 		self.register_event(
 			self.object_id,
 			opcode,
 			arg_types,
 			self.on_event_error
+		)
+
+	def on_event_delete_id(self, id):
+		self.released_object_ids.append(id)
+		print(f"Released object_id: {id}")
+
+	def register_event_delete_id(self):
+		opcode = 1
+		arg_types = (int,)
+		self.register_event(
+			self.object_id,
+			opcode,
+			arg_types,
+			self.on_event_delete_id
 		)
 
 	def schedule_request_sync(self, new_id):
@@ -800,6 +821,7 @@ class Client:
 		if self.state == self.State.CREATE_DISPLAY_REGISTRY:
 			self.display = WlDisplay()
 			self.display.register_event_error()
+			self.display.register_event_delete_id()
 			self.socket = self.display.connect()
 			self.registry = WlRegistry(self.display)
 			self.registry.register_event_global()
@@ -815,8 +837,9 @@ class Client:
 			self.display.schedule_request_sync(
 				self.registry_sync_callback.object_id
 			)
+			print(f"WlCallback created {self.registry_sync_callback.object_id}", flush=True)
 			self.state = self.State.CREATE_GLOBALS
-			print(f"WlRegistry created", flush=True)
+			print(f"WlRegistry created {self.registry.object_id}", flush=True)
 			return False
 		
 		elif self.state == self.State.CREATE_GLOBALS:
@@ -835,7 +858,7 @@ class Client:
 						version,
 						self.compositor.object_id
 					)
-					print(f"WlCompositor created", flush=True)
+					print(f"WlCompositor created {self.compositor.object_id}", flush=True)
 
 				elif iface == "zwlr_layer_shell_v1":
 					self.layer_shell = ZwlrLayerShellV1(
@@ -847,7 +870,7 @@ class Client:
 						version,
 						self.layer_shell.object_id
 					)
-					print(f"ZwlrLayerShellV1 created", flush=True)
+					print(f"ZwlrLayerShellV1 created {self.layer_shell.object_id}", flush=True)
 
 				elif iface == "wl_shm":
 					self.shm = WlShm(
@@ -859,7 +882,7 @@ class Client:
 						version,
 						self.shm.object_id
 					)
-					print(f"Shm created", flush=True)
+					print(f"Shm created {self.shm.object_id}", flush=True)
 
 			if self.registry.done:
 				self.state = self.State.HANDLE_OUTPUTS
@@ -902,7 +925,7 @@ class Client:
 			self.compositor.schedule_request_create_surface(
 				self.surface.object_id
 			)
-			print(f"WlSurface created", flush=True)
+			print(f"WlSurface created {self.surface.object_id}", flush=True)
 
 			self.layer_surface = ZwlrLayerSurfaceV1(self.display)
 			self.layer_shell.schedule_request_get_layer_surface(
@@ -912,7 +935,7 @@ class Client:
 				0,
 				"wallpaper"
 			)
-			print(f"LayerSurface created", flush=True)
+			print(f"LayerSurface created {self.layer_surface.object_id}", flush=True)
 
 			self.layer_surface.register_event_configure()
 			self.layer_surface.schedule_request_set_size(
@@ -950,7 +973,7 @@ class Client:
 				self.layer_surface.size,
 			)
 			self.state = self.State.SET_SHM_POOL
-			print(f"Shm pool with frame buffer created", flush=True)
+			print(f"Shm pool with frame buffer created {self.shm_pool.object_id}", flush=True)
 			return True
 
 		elif self.state == self.State.SET_SHM_POOL:
@@ -1009,7 +1032,7 @@ class Client:
 			)
 			self.surface.schedule_request_commit()
 			self.state = self.State.SET_BUFFER
-			print(f"Buffer created adn attached", flush=True)
+			print(f"Buffer created adn attached {self.buffer.object_id}", flush=True)
 			return False
 
 		elif self.state == self.State.SET_BUFFER:
