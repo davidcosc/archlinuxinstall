@@ -77,14 +77,20 @@ def create_object(state, interface):
 		if object_id > 0xfeffffff:
 			raise RuntimeError("Ran out of object ids")
 	state["objects"][object_id] = interface
-	state["object_ids"][interface] = object_id
+	if not state["object_ids"].get(interface):
+		state["object_ids"][interface] = [object_id]
+	else:
+		state["object_ids"][interface].append(object_id)
 	return object_id
 
 
 def destroy_object(state, object_id):
 	interface = state["objects"][object_id]
 	state["objects"].pop(object_id)
-	state["object_ids"].pop(interface)
+	if len(state["object_ids"][interface]) > 1:
+		state["object_ids"][interface].remove(object_id)
+	else:
+		state["object_ids"].pop(interface)
 	state["released_ids"].append(object_id)
 	return object_id
 
@@ -92,7 +98,8 @@ def destroy_object(state, object_id):
 # ------------------------------------------------------------------------------
 # EVENT SUBSCRIPTION
 # ------------------------------------------------------------------------------
-def listen(state, object_id, interface, event, handler):
+def listen(state, object_id, event, handler):
+	interface = state["objects"][object_id]
 	for opcode, (name, arg_types) in PROTOCOL[interface]["events"].items():
 		if name == event:
 			state["listeners"][(object_id, opcode)] = {
@@ -121,7 +128,8 @@ def encode_arg(arg_type, value):
 	return struct.pack("=I", value)
 
 
-def enqueue_encoded_message(state, object_id, interface, request, *args):
+def enqueue_encoded_message(state, object_id, request, *args):
+	interface = state["objects"][object_id]
 	opcode, arg_types, _ = PROTOCOL[interface]["requests"][request]
 	type_arg_tuples = []
 	aux = None
@@ -252,25 +260,22 @@ def main():
 	create_object(state, "wl_display")
 	listen(
 		state,
-		state["object_ids"]["wl_display"],
-		"wl_display",
+		state["object_ids"]["wl_display"][0],
 		"error",
 		on_error
 	)
 	create_object(state, "wl_registry")
 	listen(
 		state,
-		state["object_ids"]["wl_registry"],
-		"wl_registry",
+		state["object_ids"]["wl_registry"][0],
 		"global",
 		on_global
 	)
 	enqueue_encoded_message(
 		state,
-		state["object_ids"]["wl_display"],
-		"wl_display",
+		state["object_ids"]["wl_display"][0],
 		"get_registry",
-		state["object_ids"]["wl_registry"]
+		state["object_ids"]["wl_registry"][0]
 	)
 	while True:
 		if state["out_queue"]:
