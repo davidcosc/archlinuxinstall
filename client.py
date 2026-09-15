@@ -44,6 +44,11 @@ PROTOCOL={
 			0: ("global", ("uint", "string", "uint")),
 			1: ("global_remove", ("uint",))
 		}
+	},
+	"wl_callback": {
+		"events": {
+			0: ("done", ("uint",))
+		}
 	}
 }
 
@@ -251,6 +256,10 @@ def on_global(state, name, interface, version):
 	print(f"Global: {name} {interface} {version}")
 
 
+def on_done(state, callback_data):
+	print(f"Done: {callback_data}")
+
+
 # ------------------------------------------------------------------------------
 # EVENT LOOP
 # ------------------------------------------------------------------------------
@@ -271,11 +280,24 @@ def main():
 		"global",
 		on_global
 	)
+	create_object(state, "wl_callback")
+	listen(
+		state,
+		state["object_ids"]["wl_callback"][0],
+		"done",
+		on_done
+	)
 	enqueue_encoded_message(
 		state,
 		state["object_ids"]["wl_display"][0],
 		"get_registry",
 		state["object_ids"]["wl_registry"][0]
+	)
+	enqueue_encoded_message(
+		state,
+		state["object_ids"]["wl_display"][0],
+		"sync",
+		state["object_ids"]["wl_callback"][0]
 	)
 	while True:
 		if state["out_queue"]:
