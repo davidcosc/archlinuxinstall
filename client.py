@@ -49,6 +49,19 @@ PROTOCOL={
 		"events": {
 			0: ("done", ("uint",))
 		}
+	},
+	"wl_compositor": {
+		"requests": {
+			"create_surface": (0, ("new_id",), "wl_surface")
+		}
+	},
+	"wl_shm": {
+		"requests": {
+			"create_pool": (0, ("new_id", "fd", "int"), "wl_shm_pool")
+		},
+		"events": {
+			0: ("format", ("uint",))
+		}
 	}
 }
 
@@ -196,7 +209,7 @@ def enqueue_decoded_messages(state, data):
 		arg_types = listener["arg_types"]
 		handler = listener["handler"]
 		decoded_args = decode_args(args, arg_types)
-		state["in_queue"].append((handler, decoded_args))
+		state["in_queue"].append((object_id, handler, decoded_args))
 		
 
 # ------------------------------------------------------------------------------
@@ -244,20 +257,50 @@ def read_to_in_queue(state):
 # ------------------------------------------------------------------------------
 def dispatch(state):
 	while state["in_queue"]:
-		callback, args = state["in_queue"].popleft()
-		callback(state, *args)
+		object_id, callback, args = state["in_queue"].popleft()
+		callback(state, object_id, *args)
 
 
-def on_error(state, object_id, code, message):
-	print(f'Error: {state["objects"][object_id]} code {code} msg {message}')
+def on_error(state, ref_object_id, object_id, code, message):
+	print(
+		f'Err: {state["objects"][object_id]} code {code} msg {message}',
+		flush=True
+	)
 
 
-def on_global(state, name, interface, version):
-	print(f"Global: {name} {interface} {version}")
+def on_delete(state, ref_object_id, id):
+	destroy_object(state, id)
+	print(f"Del: {state["objects"]} {state["object_ids"]}", flush=True)
 
 
-def on_done(state, callback_data):
-	print(f"Done: {callback_data}")
+def on_format(state, ref_object_id, format):
+	print(f"Format: {format}", flush=True)
+
+
+def on_global(state ,ref_object_id, name, interface, version):
+	if interface in ("wl_compositor", "wl_shm"):
+		create_object(state, interface)
+		if interface == "wl_shm":
+			listen(
+				state,
+				state["object_ids"][interface][0],
+				"format",
+				on_format
+			)
+		enqueue_encoded_message(
+			state,
+			state["object_ids"]["wl_registry"][0],
+			"bind",
+			name,
+			interface,
+			version,
+			state["object_ids"][interface][0]
+		)
+		print(f"Created: {name} {interface} {version}")
+
+
+def on_done(state, ref_object_id, callback_data):
+	print(f"Done: {callback_data} {state["objects"]} {state["object_ids"]}", flush=True)
 
 
 # ------------------------------------------------------------------------------
@@ -272,6 +315,12 @@ def main():
 		state["object_ids"]["wl_display"][0],
 		"error",
 		on_error
+	)
+	listen(
+		state,
+		state["object_ids"]["wl_display"][0],
+		"delete_id",
+		on_delete
 	)
 	create_object(state, "wl_registry")
 	listen(
