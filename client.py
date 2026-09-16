@@ -67,6 +67,11 @@ PROTOCOL={
 			0: ("format", ("uint",))
 		}
 	},
+	"wl_output": {
+		"events": {
+			4: ("name", ("string",))
+		}
+	},
 	"zwlr_layer_shell_v1": {
 		"requests": {
 			"get_layer_surface": (
@@ -94,8 +99,7 @@ def init_state():
 		"next_object_id": 0,
 		"released_ids": deque(),
 		"objects": {},
-		"object_ids": {},
-		"object_names": {},
+		"objects_by_name": {},
 		"listeners": {},
 		"out_queue": deque(),
 		"in_queue": deque()
@@ -114,21 +118,14 @@ def create_object(state, interface):
 		if object_id > 0xfeffffff:
 			raise RuntimeError("Ran out of object ids")
 	state["objects"][object_id] = interface
-	if not state["object_ids"].get(interface):
-		state["object_ids"][interface] = [object_id]
-	else:
-		state["object_ids"][interface].append(object_id)
+	print(state["objects"], flush=True)
 	return object_id
 
 
 def destroy_object(state, object_id):
-	interface = state["objects"][object_id]
 	state["objects"].pop(object_id)
-	if len(state["object_ids"][interface]) > 1:
-		state["object_ids"][interface].remove(object_id)
-	else:
-		state["object_ids"].pop(interface)
 	state["released_ids"].append(object_id)
+	print(state["objects"], flush=True)
 	return object_id
 
 
@@ -220,10 +217,6 @@ def enqueue_decoded_messages(state, data):
 		offset += size
 		listener = state["listeners"].get((object_id, opcode))
 		if not listener:
-			print(
-				f"No listener for obj {object_id} op {opcode}",
-				flush=True
-			)
 			continue
 		arg_types = listener["arg_types"]
 		handler = listener["handler"]
@@ -282,46 +275,63 @@ def dispatch(state):
 
 def on_error(state, ref_object_id, object_id, code, message):
 	print(
-		f'Err: {state["objects"][object_id]} code {code} msg {message}',
+		f'Error {code}: {state["objects"][object_id]} {message}',
 		flush=True
 	)
 
 
 def on_delete(state, ref_object_id, id):
+	print(f"Delete: {id}", flush=True)
 	destroy_object(state, id)
-	print(f"Del: {state["objects"]} {state["object_ids"]}", flush=True)
-
+	
 
 def on_format(state, ref_object_id, format):
 	print(f"Format: {format}", flush=True)
 
 
+def on_output_name(state, ref_object_id, name):
+	print(f"Output: {name}", flush=True)
+
+
 def on_global(state ,ref_object_id, name, interface, version):
-	if interface in ("wl_compositor", "wl_shm", "zwlr_layer_shell_v1"):
-		create_object(state, interface)
+	if interface in (
+		"wl_compositor",
+		"wl_shm",
+		"wl_output",
+		"zwlr_layer_shell_v1"
+	):
+		print(f"Global: {name} {interface} {version}")
+		object_id = create_object(state, interface)
+		state["objects_by_name"][name] = object_id
 		if interface == "wl_shm":
 			# we do not sync, since we just print this for info
 			# instead we handle err if desired format not available
 			listen(
 				state,
-				state["object_ids"][interface][0],
+				object_id,
 				"format",
 				on_format
 			)
+		if interface == "wl_output":
+			listen(
+				state,
+				object_id,
+				"name",
+				on_output_name
+			)
 		enqueue_encoded_message(
 			state,
-			state["object_ids"]["wl_registry"][0],
+			ref_object_id,
 			"bind",
 			name,
 			interface,
 			version,
-			state["object_ids"][interface][0]
+			object_id
 		)
-		print(f"Created: {name} {interface} {version}")
 
 
 def on_done(state, ref_object_id, callback_data):
-	print(f"Done: {callback_data} {state["objects"]} {state["object_ids"]}", flush=True)
+	print(f"Done: {callback_data}", flush=True)
 
 
 # ------------------------------------------------------------------------------
@@ -330,44 +340,44 @@ def on_done(state, ref_object_id, callback_data):
 def main():
 	state = init_state()
 	connect(state)
-	create_object(state, "wl_display")
+	display_object_id = create_object(state, "wl_display")
 	listen(
 		state,
-		state["object_ids"]["wl_display"][0],
+		display_object_id,
 		"error",
 		on_error
 	)
 	listen(
 		state,
-		state["object_ids"]["wl_display"][0],
+		display_object_id,
 		"delete_id",
 		on_delete
 	)
-	create_object(state, "wl_registry")
+	registry_object_id = create_object(state, "wl_registry")
 	listen(
 		state,
-		state["object_ids"]["wl_registry"][0],
+		registry_object_id,
 		"global",
 		on_global
 	)
-	create_object(state, "wl_callback")
+	callback_object_id = create_object(state, "wl_callback")
 	listen(
 		state,
-		state["object_ids"]["wl_callback"][0],
+		callback_object_id,
 		"done",
 		on_done
 	)
 	enqueue_encoded_message(
 		state,
-		state["object_ids"]["wl_display"][0],
+		display_object_id,
 		"get_registry",
-		state["object_ids"]["wl_registry"][0]
+		registry_object_id
 	)
 	enqueue_encoded_message(
 		state,
-		state["object_ids"]["wl_display"][0],
+		display_object_id,
 		"sync",
-		state["object_ids"]["wl_callback"][0]
+		callback_object_id
 	)
 	while True:
 		if state["out_queue"]:
