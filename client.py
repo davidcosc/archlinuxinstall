@@ -57,10 +57,29 @@ PROTOCOL={
 	},
 	"wl_shm": {
 		"requests": {
-			"create_pool": (0, ("new_id", "fd", "int"), "wl_shm_pool")
+			"create_pool": (
+				0,
+				("new_id", "fd", "int"),
+				"wl_shm_pool"
+			)
 		},
 		"events": {
 			0: ("format", ("uint",))
+		}
+	},
+	"zwlr_layer_shell_v1": {
+		"requests": {
+			"get_layer_surface": (
+				0,
+				(
+					"new_id",
+					"object",
+					"object",
+					"uint",
+					"string"
+				),
+				"zwlr_layer_surface_v1"
+			)
 		}
 	}
 }
@@ -278,9 +297,11 @@ def on_format(state, ref_object_id, format):
 
 
 def on_global(state ,ref_object_id, name, interface, version):
-	if interface in ("wl_compositor", "wl_shm"):
+	if interface in ("wl_compositor", "wl_shm", "zwlr_layer_shell_v1"):
 		create_object(state, interface)
 		if interface == "wl_shm":
+			# we do not sync, since we just print this for info
+			# instead we handle err if desired format not available
 			listen(
 				state,
 				state["object_ids"][interface][0],
