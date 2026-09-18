@@ -19,373 +19,341 @@ import os
 import select
 import socket
 import struct
-import time
 from collections import deque
 from pathlib import Path
 from PIL import Image
 
 
-PROTOCOL={
-	"wl_display": {
-		"requests": {
-			"sync": (0, ("new_id",), "wl_callback"),
-			"get_registry": (1, ("new_id",), "wl_registry")
-		},
-		"events": {
-			0: ("error", ("object", "uint", "string")),
-			1: ("delete_id", ("uint",))
-		}
-	},
-	"wl_registry": {
-		"requests": {
-			"bind": (0, ("uint", "string", "uint", "new_id"), "n/a")
-		},
-		"events": {
-			0: ("global", ("uint", "string", "uint")),
-			1: ("global_remove", ("uint",))
-		}
-	},
-	"wl_callback": {
-		"events": {
-			0: ("done", ("uint",))
-		}
-	},
-	"wl_compositor": {
-		"requests": {
-			"create_surface": (0, ("new_id",), "wl_surface")
-		}
-	},
-	"wl_shm": {
-		"requests": {
-			"create_pool": (
-				0,
-				("new_id", "fd", "int"),
-				"wl_shm_pool"
-			)
-		},
-		"events": {
-			0: ("format", ("uint",))
-		}
-	},
-	"wl_output": {
-		"events": {
-			4: ("name", ("string",))
-		}
-	},
-	"zwlr_layer_shell_v1": {
-		"requests": {
-			"get_layer_surface": (
-				0,
-				(
-					"new_id",
-					"object",
-					"object",
-					"uint",
-					"string"
-				),
-				"zwlr_layer_surface_v1"
-			)
-		}
-	}
-}
+class Output:
+	def __init__(self, wl_output):
+		self.is_new = True
+		self.need_render = True
+		self.wl_output = wl_output
 
 
-# ------------------------------------------------------------------------------
-# STATE CREATION
-# ------------------------------------------------------------------------------
-def init_state():
-	return {
-		"sock": None,
-		"next_object_id": 0,
-		"released_ids": deque(),
-		"objects": {},
-		"objects_by_name": {},
-		"listeners": {},
-		"out_queue": deque(),
-		"in_queue": deque()
-	}
+class ZwlrLayerShellV1:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-
-# ------------------------------------------------------------------------------
-# OBJECT CREATION/DESTRUCTION
-# ------------------------------------------------------------------------------
-def create_object(state, interface):
-	if state["released_ids"]:
-		object_id = state["released_ids"].popleft()
-	else:
-		state["next_object_id"] += 1
-		object_id = state["next_object_id"]
-		if object_id > 0xfeffffff:
-			raise RuntimeError("Ran out of object ids")
-	state["objects"][object_id] = interface
-	print(state["objects"], flush=True)
-	return object_id
-
-
-def destroy_object(state, object_id):
-	state["objects"].pop(object_id)
-	state["released_ids"].append(object_id)
-	print(state["objects"], flush=True)
-	return object_id
-
-
-# ------------------------------------------------------------------------------
-# EVENT SUBSCRIPTION
-# ------------------------------------------------------------------------------
-def listen(state, object_id, event, handler):
-	interface = state["objects"][object_id]
-	for opcode, (name, arg_types) in PROTOCOL[interface]["events"].items():
-		if name == event:
-			state["listeners"][(object_id, opcode)] = {
-				"arg_types": arg_types,
-				"handler": handler
-			}
-			return
-	raise RuntimeError(f"Could not create listener for event {event}")
-
-
-# ------------------------------------------------------------------------------
-# WAYLAND WIRE PROTOCOL HANDLING
-# ------------------------------------------------------------------------------
-def pad4(n):
-	return (4 - (n % 4)) % 4
-
-
-def encode_arg(arg_type, value):
-	if value is None:
-		return struct.pack("=I", 0)
-	if arg_type == "string":
-		data = value.encode("utf-8") + b"\x00"
-		len_data = len(data)
-		data = data + b"\x00" * pad4(len_data)
-		return struct.pack("=I", len_data) + data
-	return struct.pack("=I", value)
-
-
-def enqueue_encoded_message(state, object_id, request, *args):
-	interface = state["objects"][object_id]
-	opcode, arg_types, _ = PROTOCOL[interface]["requests"][request]
-	type_arg_tuples = []
-	aux = None
-	for index, arg_type in enumerate(arg_types):
-		if arg_type == "fd":
-			aux = (
-				socket.SOL_SOCKET,
-				socket.SCM_RIGHTS,
-				struct.pack("=i", args[index])
-			)
-			continue
-		type_arg_tuples.append((arg_type, args[index]))
-	encoded_args = b"".join(encode_arg(k, v) for k, v in type_arg_tuples)
-	size = 8 + len(encoded_args)
-	header = struct.pack("=II", object_id, (size << 16) | opcode)
-	encoded_msg = header + encoded_args
-	print(f"C -> S: {encoded_msg.hex()}", flush=True)
-	msg = {"payload": encoded_msg, "aux": aux}
-	state["out_queue"].append(msg)
-	return msg
-
-
-def decode_args(args, arg_types):
-	offset = 0
-	decoded_args = []
-	for arg_type in arg_types:
-		first_int = struct.unpack("=I", args[offset:offset + 4])[0]
-		offset += 4
-		if arg_type == "string":
-			slen = first_int
-			sbytes = args[offset:offset + slen]
-			decoded_args.append(sbytes[:-1].decode("utf-8"))
-			offset += slen + pad4(slen)
-		else:
-			arg = first_int
-			decoded_args.append(arg)
-	return decoded_args
-
-
-def enqueue_decoded_messages(state, data):
-	offset = 0
-	while offset < len(data):
-		object_id, size_opcode = struct.unpack(
-			"=II",
-			data[offset:offset + 8]
+	def get_layer_surface(self, id, suface, output, layer, namespace):
+		return (
+			self.object_id,
+			0,
+			(id, suface, output, layer, namespace),
+			("new_id", "object", "object", "uint", "string")
 		)
-		size = size_opcode >> 16
-		opcode = size_opcode & 0xffff
-		args = data[offset + 8:offset + size]
-		print(f"S -> C: {data[offset:offset + size].hex()}", flush=True)
-		offset += size
-		listener = state["listeners"].get((object_id, opcode))
-		if not listener:
-			continue
-		arg_types = listener["arg_types"]
-		handler = listener["handler"]
-		decoded_args = decode_args(args, arg_types)
-		state["in_queue"].append((object_id, handler, decoded_args))
+
+
+class WaylandOutput:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+
+class WaylandShm:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def create_pool(self, id, fd, size):
+		return (
+			self.object_id,
+			0,
+			(id, fd, size),
+			("new_id", "fd", "int")
+		)
+
+
+class WaylandCompositor:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def create_surface(self, id):
+		return (self.object_id, 0, (id,), ("new_id",))
+
+
+class WaylandCallback:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def done(self):
+		return (self.object_id, 0, ("uint",))
+
+
+class WaylandRegistry:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def bind(self, name, interface, version, id):
+		return (
+			self.object_id,
+			0,
+			(name, interface, version, id),
+			("uint", "string", "uint", "new_id")
+		)
+
+	def global_(self):
+		return (self.object_id, 0, ("uint", "string", "uint"))
+
+	def global_remove(self):
+		return (self.object_id, 1, ("uint",))
+
+
+class WaylandDisplay:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def sync(self, callback):
+		return (self.object_id, 0, (callback,), ("new_id",))
+
+	def get_registry(self, registry):
+		return (self.object_id, 1, (registry,), ("new_id",))
+
+	def error(self):
+		return (self.object_id, 0, ("object", "uint", "string"))
+
+	def delete_id(self):
+		return (self.object_id, 1, ("uint",))
+
+
+class WaylandConnection:
+	def __init__(self):
+		self.sock = None
+		self.next_object_id = 0
+		self.released_object_ids = deque()
+		self.objects = [None] * 20
+		self.listeners = [None] * 20 * 16
+		self.outputs = []
+		self.out_queue = deque()
+		self.in_queue = deque()
+
+	def create_object(self, interface):
+		if self.released_object_ids:
+			object_id = self.released_object_ids.popleft()
+		else:
+			self.next_object_id += 1
+			object_id = self.next_object_id
+			if object_id > 0xfeffffff:
+				raise RuntimeError("Ran out of object ids")
+		wl_object = interface(object_id)
+		self.objects[object_id] = wl_object
+		print(self.objects, flush=True)
+		return wl_object
+
+	def destroy_object(self, object_id):
+		self.objects[object_id] = None
+		self.released_object_ids.append(object_id)
+		for i in range(16):
+			self.listeners[(object_id << 4) | i] = None
+		print(self.objects, flush=True)
+		return object_id
 		
+	def listen(self, event, callback):
+		object_id, opcode, arg_types = event
+		index = (object_id << 4) | opcode
+		self.listeners[index] = (callback, arg_types)
+		return index
 
-# ------------------------------------------------------------------------------
-# I/O HANDLING
-# ------------------------------------------------------------------------------
-def connect(state):
-	# https://wayland-book.com/protocol-design/wire-protocol.html#transports
-	# we do not check WAYLAND_SOCKET since this client is not intended to be
-	# used as a subclient
-	runtime_dir = os.environ["XDG_RUNTIME_DIR"]
+	def pad4(self, n):
+		return (4 - (n % 4)) % 4
 
-	if not runtime_dir:
-		exit(1)
-	
-	display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
-	path = os.path.join(runtime_dir, display)
-	sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-	sock.connect(path)
-	state["sock"] = sock
+	def encode_arg(self, arg_type, value):
+		if value is None:
+			return struct.pack("=I", 0)
+		if arg_type == "string":
+			data = value.encode("utf-8") + b"\x00"
+			len_data = len(data)
+			data = data + b"\x00" * self.pad4(len_data)
+			return struct.pack("=I", len_data) + data
+		return struct.pack("=I", value)
 
+	def enqueue_out_message(self, request):
+		object_id, opcode, args, arg_types = request
+		type_arg_tuples = []
+		aux = None
+		for index, arg_type in enumerate(arg_types):
+			if arg_type == "fd":
+				aux = (
+					socket.SOL_SOCKET,
+					socket.SCM_RIGHTS,
+					struct.pack("=i", args[index])
+				)
+				continue
+			type_arg_tuples.append((arg_type, args[index]))
+		encoded_args = b"".join(
+			self.encode_arg(k, v) for k, v in type_arg_tuples
+		)
+		size = 8 + len(encoded_args)
+		header = struct.pack("=II", object_id, (size << 16) | opcode)
+		encoded_msg = header + encoded_args
+		print(f"C -> S: {encoded_msg.hex()}", flush=True)
+		msg = (encoded_msg, aux)
+		self.out_queue.append(msg)
+		return msg
 
-def flush_out_queue(state):
-	sock = state["sock"]
-	while state["out_queue"]:
-		msg = state["out_queue"].popleft()
-		data = msg["payload"]
-		auxdata = [msg["aux"]] if msg["aux"] else []
-		num_sent = 0
-		while num_sent < len(data):
-			num_sent += sock.sendmsg(
-				[data[num_sent:]],
-				auxdata if num_sent == 0 else []
+	def decode_args(self, args, arg_types):
+		offset = 0
+		decoded_args = []
+		for arg_type in arg_types:
+			first_int = struct.unpack(
+				"=I",
+				args[offset:offset + 4]
+			)[0]
+			offset += 4
+			if arg_type == "string":
+				slen = first_int
+				sbytes = args[offset:offset + slen]
+				decoded_args.append(sbytes[:-1].decode("utf-8"))
+				offset += slen + self.pad4(slen)
+			else:
+				arg = first_int
+				decoded_args.append(arg)
+		return decoded_args
+
+	def enqueue_in_messages(self, data):
+		offset = 0
+		while offset < len(data):
+			object_id, size_opcode = struct.unpack(
+				"=II",
+				data[offset:offset + 8]
+			)
+			size = size_opcode >> 16
+			opcode = size_opcode & 0xffff
+			args = data[offset + 8:offset + size]
+			print(
+				f"S -> C: {data[offset:offset + size].hex()}",
+				flush=True
+			)
+			offset += size
+			listener = self.listeners[(object_id << 4) | opcode]
+			if not listener:
+				continue
+			callback, arg_types = listener
+			decoded_args = self.decode_args(args, arg_types)
+			self.in_queue.append(
+				(object_id, callback, decoded_args)
 			)
 
+	def connect(self):
+		# https://wayland-book.com/protocol-design/wire-protocol.html
+		# #transports
+		# we do not check WAYLAND_SOCKET since this client is not 
+		# intended to be used as a subclient
+		runtime_dir = os.environ["XDG_RUNTIME_DIR"]
 
-def read_to_in_queue(state):
-	data = os.read(state["sock"].fileno(), 4096)
-	if data == b"":
-		raise ConnectionError("Compositor closed connection")
-	enqueue_decoded_messages(state, data)
+		if not runtime_dir:
+			exit(1)
+		
+		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
+		path = os.path.join(runtime_dir, display)
+		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		sock.connect(path)
+		self.sock = sock
+
+	def flush_out_queue(self):
+		while self.out_queue:
+			data, aux = self.out_queue.popleft()
+			auxdata = [aux] if aux else []
+			num_sent = 0
+			while num_sent < len(data):
+				num_sent += self.sock.sendmsg(
+					[data[num_sent:]],
+					auxdata if num_sent == 0 else []
+				)
+
+	def fill_in_queue(self):
+		data = os.read(self.sock.fileno(), 4096)
+		if data == b"":
+			raise ConnectionError("Compositor closed connection")
+		self.enqueue_in_messages(data)
+
+	def dispatch(self):
+		while self.in_queue:
+			object_id, callback, args = self.in_queue.popleft()
+			callback(self, object_id, *args)
+
+
+# ------------------------------------------------------------------------------
+# OUTPUT HANDLING
+# ------------------------------------------------------------------------------
+def handle_output(wl_connection):
+	for output in wl_connection.outputs:
+		if output.is_new:
+			output.is_new = False
+			print(f"Output: Create surface, layer surfac, buffer")
+		if output.need_render:
+			output.need_render = False
+			print(f"Output: Need render")
 
 
 # ------------------------------------------------------------------------------
 # ROUTING AND EVENT HANDLING
 # ------------------------------------------------------------------------------
-def dispatch(state):
-	while state["in_queue"]:
-		object_id, callback, args = state["in_queue"].popleft()
-		callback(state, object_id, *args)
+def on_error(wl_connection, ref_object_id, object_id, code, message):
+	print(f"Error: {code}: {object_id} {message}", flush=True)
 
 
-def on_error(state, ref_object_id, object_id, code, message):
-	print(
-		f'Error {code}: {state["objects"][object_id]} {message}',
-		flush=True
-	)
-
-
-def on_delete(state, ref_object_id, id):
+def on_delete(wl_connection, ref_object_id, id):
 	print(f"Delete: {id}", flush=True)
-	destroy_object(state, id)
-	
-
-def on_format(state, ref_object_id, format):
-	print(f"Format: {format}", flush=True)
+	wl_connection.destroy_object(id)
 
 
-def on_output_name(state, ref_object_id, name):
-	print(f"Output: {name}", flush=True)
-
-
-def on_global(state ,ref_object_id, name, interface, version):
-	if interface in (
-		"wl_compositor",
-		"wl_shm",
-		"wl_output",
-		"zwlr_layer_shell_v1"
-	):
-		print(f"Global: {name} {interface} {version}")
-		object_id = create_object(state, interface)
-		state["objects_by_name"][name] = object_id
-		if interface == "wl_shm":
-			# we do not sync, since we just print this for info
-			# instead we handle err if desired format not available
-			listen(
-				state,
-				object_id,
-				"format",
-				on_format
+def on_global(wl_connection, ref_object_id, name, interface, version):
+	wl_object = None
+	if interface == "wl_compositor":
+		wl_object = wl_connection.create_object(WaylandCompositor)
+	elif interface == "wl_shm":
+		wl_object = wl_connection.create_object(WaylandShm)
+	elif interface == "wl_output":
+		wl_object = wl_connection.create_object(WaylandOutput)
+		wl_connection.outputs.append(Output(wl_object))
+	elif interface == "zwlr_layer_shell_v1":
+		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
+	if wl_object:
+		wl_connection.enqueue_out_message(
+			wl_connection.objects[2].bind(
+				name,
+				interface,
+				version,
+				wl_object.object_id
 			)
-		if interface == "wl_output":
-			listen(
-				state,
-				object_id,
-				"name",
-				on_output_name
-			)
-		enqueue_encoded_message(
-			state,
-			ref_object_id,
-			"bind",
-			name,
-			interface,
-			version,
-			object_id
 		)
+	print(f"Global: {name} {interface} {version}")
 
+def on_done(wl_connection, ref_object_id, callback_data):
+	print(f"Done: {callback_data}")
+	handle_output(wl_connection)
 
-def on_done(state, ref_object_id, callback_data):
-	print(f"Done: {callback_data}", flush=True)
 
 
 # ------------------------------------------------------------------------------
 # EVENT LOOP
 # ------------------------------------------------------------------------------
 def main():
-	state = init_state()
-	connect(state)
-	display_object_id = create_object(state, "wl_display")
-	listen(
-		state,
-		display_object_id,
-		"error",
-		on_error
+	wl_connection = WaylandConnection()
+	wl_connection.connect()
+	wl_display = wl_connection.create_object(WaylandDisplay)
+	wl_connection.listen(wl_display.error(), on_error)
+	wl_connection.listen(wl_display.delete_id(), on_delete)
+	wl_registry = wl_connection.create_object(WaylandRegistry)
+	wl_connection.listen(wl_registry.global_(), on_global)
+	wl_connection.enqueue_out_message(
+		wl_display.get_registry(wl_registry.object_id)
 	)
-	listen(
-		state,
-		display_object_id,
-		"delete_id",
-		on_delete
-	)
-	registry_object_id = create_object(state, "wl_registry")
-	listen(
-		state,
-		registry_object_id,
-		"global",
-		on_global
-	)
-	callback_object_id = create_object(state, "wl_callback")
-	listen(
-		state,
-		callback_object_id,
-		"done",
-		on_done
-	)
-	enqueue_encoded_message(
-		state,
-		display_object_id,
-		"get_registry",
-		registry_object_id
-	)
-	enqueue_encoded_message(
-		state,
-		display_object_id,
-		"sync",
-		callback_object_id
+	wl_callback = wl_connection.create_object(WaylandCallback)
+	wl_connection.listen(wl_callback.done(), on_done)
+	wl_connection.enqueue_out_message(
+		wl_display.sync(wl_callback.object_id)
 	)
 	while True:
-		if state["out_queue"]:
-			flush_out_queue(state)
-		rlist, _, _ = select.select([state["sock"].fileno()], [], [])
+		if wl_connection.out_queue:
+			wl_connection.flush_out_queue()
+		rlist, _, _ = select.select(
+			[wl_connection.sock.fileno()],
+			[],
+			[]
+		)
 		if rlist:
-			read_to_in_queue(state)
-			dispatch(state)
+			wl_connection.fill_in_queue()
+			wl_connection.dispatch()
 
 
 if __name__ == "__main__":
