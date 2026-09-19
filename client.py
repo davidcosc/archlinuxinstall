@@ -24,11 +24,42 @@ from pathlib import Path
 from PIL import Image
 
 
+class WaylandSurface:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def destroy(self):
+		return (self.object_id, 0, (), ())
+
+	def attach(self, buffer, x, y):
+		return (
+			self.object_id,
+			1,
+			(buffer, x, y),
+			("object", "int", "int")
+		)
+
+	def damage(self, x, y, width, height):
+		return (
+			self.object_id,
+			2,
+			(x, y, width, height),
+			("int", "int", "int", "int")
+		)
+
+	def commit(self):
+		return (self.object_id, 6)
+
+
 class Output:
-	def __init__(self, wl_output):
+	def __init__(self, wl_output, name):
+		self.name = name
 		self.is_new = True
 		self.need_render = True
 		self.wl_output = wl_output
+		self.surface = None
+		self.layer_surface = None
+		self.buffer = None
 
 
 class ZwlrLayerShellV1:
@@ -126,6 +157,7 @@ class WaylandConnection:
 		self.compositor = None
 		self.shm = None
 		self.layer_shell = None
+		self.bound_globals = False
 		self.outputs = []
 		self.out_queue = deque()
 		self.in_queue = deque()
@@ -292,9 +324,15 @@ class WaylandConnection:
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
 # ------------------------------------------------------------------------------
-def handle_output(output):
+def handle_output(wl_connection, output):
 	if output.is_new:
 		output.is_new = False
+		output.surface = wl_connection.create_object(WaylandSurface)
+		wl_connection.enqueue_out_message(
+			wl_connection.compositor.create_surface(
+				output.surface.object_id
+			)
+		)
 		print(f"Output: Create surface, layer surfac, buffer")
 	if output.need_render:
 		output.need_render = False
@@ -323,13 +361,9 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 		wl_connection.shm = wl_object
 	elif interface == "wl_output":
 		wl_object = wl_connection.create_object(WaylandOutput)
-		wl_connection.outputs.append(Output(wl_object))
-		if (
-			wl_connection.compositor
-			and wl_connection.shm
-			and wl_connection.layer_shell
-		):
-			handle_output(wl_connection.outputs[-1])
+		wl_connection.outputs.append(Output(wl_object, name))
+		if wl_connection.bound_globals:
+			handle_output(wl_connection, wl_connection.outputs[-1])
 	elif interface == "zwlr_layer_shell_v1":
 		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
 		wl_connection.layer_shell = wl_object
@@ -346,8 +380,9 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 
 def on_done(wl_connection, ref_object_id, callback_data):
 	print(f"Done: {callback_data}")
+	wl_connection.bound_globals = True
 	for output in wl_connection.outputs:
-		handle_output(output)
+		handle_output(wl_connection, output)
 
 
 
