@@ -292,14 +292,13 @@ class WaylandConnection:
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
 # ------------------------------------------------------------------------------
-def handle_output(wl_connection):
-	for output in wl_connection.outputs:
-		if output.is_new:
-			output.is_new = False
-			print(f"Output: Create surface, layer surfac, buffer")
-		if output.need_render:
-			output.need_render = False
-			print(f"Output: Need render")
+def handle_output(output):
+	if output.is_new:
+		output.is_new = False
+		print(f"Output: Create surface, layer surfac, buffer")
+	if output.need_render:
+		output.need_render = False
+		print(f"Output: Need render")
 
 
 # ------------------------------------------------------------------------------
@@ -312,7 +311,6 @@ def on_error(wl_connection, ref_object_id, object_id, code, message):
 def on_delete(wl_connection, ref_object_id, id):
 	print(f"Delete: {id}", flush=True)
 	wl_connection.destroy_object(id)
-	print(vars(wl_connection))
 
 
 def on_global(wl_connection, ref_object_id, name, interface, version):
@@ -326,6 +324,12 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 	elif interface == "wl_output":
 		wl_object = wl_connection.create_object(WaylandOutput)
 		wl_connection.outputs.append(Output(wl_object))
+		if (
+			wl_connection.compositor
+			and wl_connection.shm
+			and wl_connection.layer_shell
+		):
+			handle_output(wl_connection.outputs[-1])
 	elif interface == "zwlr_layer_shell_v1":
 		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
 		wl_connection.layer_shell = wl_object
@@ -342,7 +346,8 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 
 def on_done(wl_connection, ref_object_id, callback_data):
 	print(f"Done: {callback_data}")
-	handle_output(wl_connection)
+	for output in wl_connection.outputs:
+		handle_output(output)
 
 
 
