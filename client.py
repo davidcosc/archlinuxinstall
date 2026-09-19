@@ -119,8 +119,13 @@ class WaylandConnection:
 		self.sock = None
 		self.next_object_id = 0
 		self.released_object_ids = deque()
-		self.objects = [None] * 20
 		self.listeners = [None] * 20 * 16
+		self.display = None
+		self.registry = None
+		self.callback = None
+		self.compositor = None
+		self.shm = None
+		self.layer_shell = None
 		self.outputs = []
 		self.out_queue = deque()
 		self.in_queue = deque()
@@ -133,17 +138,30 @@ class WaylandConnection:
 			object_id = self.next_object_id
 			if object_id > 0xfeffffff:
 				raise RuntimeError("Ran out of object ids")
-		wl_object = interface(object_id)
-		self.objects[object_id] = wl_object
-		print(self.objects, flush=True)
-		return wl_object
+		return interface(object_id)
 
 	def destroy_object(self, object_id):
-		self.objects[object_id] = None
 		self.released_object_ids.append(object_id)
 		for i in range(16):
 			self.listeners[(object_id << 4) | i] = None
-		print(self.objects, flush=True)
+		for attr in (
+			"display",
+			"registry",
+			"compositor",
+			"callback",
+			"shm",
+			"layer_shell"
+		):
+			obj = getattr(self, attr)
+			if obj and obj.object_id == object_id:
+				setattr(self, attr, None)
+				return object_id
+		for output in self.outputs:
+			for attr in ("wl_output"):
+				obj = getattr(output, attr)
+				if obj and obj.object_id == object_id:
+					setattr(output, attr, None)
+					return object_id
 		return object_id
 		
 	def listen(self, event, callback):
@@ -294,22 +312,26 @@ def on_error(wl_connection, ref_object_id, object_id, code, message):
 def on_delete(wl_connection, ref_object_id, id):
 	print(f"Delete: {id}", flush=True)
 	wl_connection.destroy_object(id)
+	print(vars(wl_connection))
 
 
 def on_global(wl_connection, ref_object_id, name, interface, version):
 	wl_object = None
 	if interface == "wl_compositor":
 		wl_object = wl_connection.create_object(WaylandCompositor)
+		wl_connection.compositor = wl_object
 	elif interface == "wl_shm":
 		wl_object = wl_connection.create_object(WaylandShm)
+		wl_connection.shm = wl_object
 	elif interface == "wl_output":
 		wl_object = wl_connection.create_object(WaylandOutput)
 		wl_connection.outputs.append(Output(wl_object))
 	elif interface == "zwlr_layer_shell_v1":
 		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
+		wl_connection.layer_shell = wl_object
 	if wl_object:
 		wl_connection.enqueue_out_message(
-			wl_connection.objects[2].bind(
+			wl_connection.registry.bind(
 				name,
 				interface,
 				version,
@@ -331,14 +353,17 @@ def main():
 	wl_connection = WaylandConnection()
 	wl_connection.connect()
 	wl_display = wl_connection.create_object(WaylandDisplay)
+	wl_connection.display = wl_display
 	wl_connection.listen(wl_display.error(), on_error)
 	wl_connection.listen(wl_display.delete_id(), on_delete)
 	wl_registry = wl_connection.create_object(WaylandRegistry)
+	wl_connection.registry = wl_registry
 	wl_connection.listen(wl_registry.global_(), on_global)
 	wl_connection.enqueue_out_message(
 		wl_display.get_registry(wl_registry.object_id)
 	)
 	wl_callback = wl_connection.create_object(WaylandCallback)
+	wl_connection.callback = wl_callback
 	wl_connection.listen(wl_callback.done(), on_done)
 	wl_connection.enqueue_out_message(
 		wl_display.sync(wl_callback.object_id)
