@@ -80,12 +80,15 @@ class WaylandSurface:
 class Output:
 	def __init__(self, wl_output, name):
 		self.name = name
-		self.is_new = True
-		self.need_render = True
 		self.wl_output = wl_output
 		self.surface = None
 		self.layer_surface = None
 		self.buffer = None
+		self.width = 0
+		self.height = 0
+		self.preferred_buffer_scale = 1
+		self.configure_serial = None
+		self.render_pending = False
 
 
 class ZwlrLayerShellV1:
@@ -187,6 +190,7 @@ class WaylandConnection:
 		self.outputs = []
 		self.out_queue = deque()
 		self.in_queue = deque()
+		self.task_queue = deque()
 
 	def create_object(self, interface):
 		if self.released_object_ids:
@@ -346,57 +350,62 @@ class WaylandConnection:
 			object_id, callback, args = self.in_queue.popleft()
 			callback(self, object_id, *args)
 
+	def work_tasks(self):
+		while self.task_queue:
+			task, args = self.task_queue.popleft()
+			task(self, *args)
 
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
 # ------------------------------------------------------------------------------
-def handle_output(wl_connection, output):
-	if output.is_new:
-		output.is_new = False
-		output.surface = wl_connection.create_object(WaylandSurface)
-		wl_connection.listen(
-			output.surface.preferred_buffer_scale(),
-			on_scale
+def render_output(wl_connection, output):
+	output.render_pending = False
+	# TODO: buffer creation, attach, commit etc.
+	print(f"Output: Need render")
+
+
+def handle_new_output(wl_connection, output):
+	output.surface = wl_connection.create_object(WaylandSurface)
+	wl_connection.listen(
+		output.surface.preferred_buffer_scale(),
+		on_scale
+	)
+	wl_connection.enqueue_out_message(
+		wl_connection.compositor.create_surface(
+			output.surface.object_id
 		)
-		wl_connection.enqueue_out_message(
-			wl_connection.compositor.create_surface(
-				output.surface.object_id
-			)
+	)
+	print(f"Output: Create surface {output.surface.object_id}")
+	output.layer_surface = (
+		wl_connection.create_object(ZwlrLayerSurfaceV1)
+	)
+	wl_connection.listen(
+		output.layer_surface.configure(),
+		on_configure
+	)
+	wl_connection.listen(
+		output.layer_surface.closed(),
+		on_closed
+	)
+	wl_connection.enqueue_out_message(
+		wl_connection.layer_shell.get_layer_surface(
+			output.layer_surface.object_id,
+			output.surface.object_id,
+			output.wl_output.object_id,
+			0,
+			"bg_wallpaper"
 		)
-		print(f"Output: Create surface {output.surface.object_id}")
-		output.layer_surface = (
-			wl_connection.create_object(ZwlrLayerSurfaceV1)
-		)
-		wl_connection.listen(
-			output.layer_surface.configure(),
-			on_configure
-		)
-		wl_connection.listen(
-			output.layer_surface.closed(),
-			on_closed
-		)
-		wl_connection.enqueue_out_message(
-			wl_connection.layer_shell.get_layer_surface(
-				output.layer_surface.object_id,
-				output.surface.object_id,
-				output.wl_output.object_id,
-				0,
-				"bg_wallpaper"
-			)
-		)
-		print(
-			f"Output: Create layer surface"
-			+ f" {output.layer_surface.object_id}")
-		wl_connection.enqueue_out_message(
-			output.layer_surface.set_size(0, 0)
-		)
-		wl_connection.enqueue_out_message(
-			output.layer_surface.set_anchor(1 | 2 | 4 | 8)
-		)
-		wl_connection.enqueue_out_message(output.surface.commit())
-	if output.need_render:
-		output.need_render = False
-		print(f"Output: Need render")
+	)
+	print(
+		f"Output: Create layer surface"
+		+ f" {output.layer_surface.object_id}")
+	wl_connection.enqueue_out_message(
+		output.layer_surface.set_size(0, 0)
+	)
+	wl_connection.enqueue_out_message(
+		output.layer_surface.set_anchor(1 | 2 | 4 | 8)
+	)
+	wl_connection.enqueue_out_message(output.surface.commit())
 
 
 # ------------------------------------------------------------------------------
@@ -407,10 +416,37 @@ def on_closed(wl_connection, ref_object_id):
 
 
 def on_configure(wl_connection, ref_object_id, serial, width, height):
+	output = None
+	for outp in wl_connection.outputs:
+		if outp.layer_surface.object_id == ref_object_id:
+			output = outp
+			break
+	output.width = width
+	output.height = height
+	output.configure_serial = serial
+	wl_connection.enqueue_out_message(
+		output.layer_surface.ack_configure(serial)
+	)
+	if not output.render_pending:
+		output.render_pending = True
+		wl_connection.task_queue.append(
+			(render_output, (output,))
+		)
 	print(f"Configure: {serial} {width} {height}")
 
 
 def on_scale(wl_connection, ref_object_id, scale):
+	output = None
+	for outp in wl_connection.outputs:
+		if outp.surface.object_id == ref_object_id:
+			output = outp
+			break
+	output.preferred_buffer_scale = scale
+	if not output.render_pending:
+		output.render_pending = True
+		wl_connection.task_queue.append(
+			(render_output, (output,))
+		)
 	print(f"Preferred buffer scale: {scale}")
 
 
@@ -435,7 +471,10 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 		wl_object = wl_connection.create_object(WaylandOutput)
 		wl_connection.outputs.append(Output(wl_object, name))
 		if wl_connection.bound_globals:
-			handle_output(wl_connection, wl_connection.outputs[-1])
+			handle_new_output(
+				wl_connection,
+				wl_connection.outputs[-1]
+			)
 	elif interface == "zwlr_layer_shell_v1":
 		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
 		wl_connection.layer_shell = wl_object
@@ -457,7 +496,7 @@ def on_done(wl_connection, ref_object_id, callback_data):
 	print(f"Done: {callback_data}")
 	wl_connection.bound_globals = True
 	for output in wl_connection.outputs:
-		handle_output(wl_connection, output)
+		handle_new_output(wl_connection, output)
 
 
 
@@ -484,6 +523,8 @@ def main():
 		wl_display.sync(wl_callback.object_id)
 	)
 	while True:
+		if wl_connection.task_queue:
+			wl_connection.work_tasks()
 		if wl_connection.out_queue:
 			wl_connection.flush_out_queue()
 		rlist, _, _ = select.select(
