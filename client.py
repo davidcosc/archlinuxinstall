@@ -24,6 +24,33 @@ from pathlib import Path
 from PIL import Image
 
 
+class WaylandBuffer:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def destroy(self):
+		return (self.object_id, 0, (), ())
+
+	def release(self):
+		return (self.object_id, 0, ())
+
+
+class WaylandShmPool:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def create_buffer(self, id, offset, width, height, stride, format):
+		return (
+			self.object_id,
+			0,
+			(id, offset, width, height, stride, format),
+			("new_id", "int", "int", "int", "int", "uint")
+		)
+
+	def destroy(self):
+		return (self.object_id, 1, (), ())
+
+
 class ZwlrLayerSurfaceV1:
 	def __init__(self, object_id):
 		self.object_id = object_id
@@ -83,7 +110,6 @@ class Output:
 		self.wl_output = wl_output
 		self.surface = None
 		self.layer_surface = None
-		self.buffer = None
 		self.width = 0
 		self.height = 0
 		self.preferred_buffer_scale = 1
@@ -358,10 +384,49 @@ class WaylandConnection:
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
 # ------------------------------------------------------------------------------
+def create_shared_frame_buffer(size):
+	buf_fd = os.memfd_create("bg_frame_buffer")
+	os.ftruncate(buf_fd, size)
+	buf = mmap.mmap(
+		buf_fd,
+		size,
+		flags=mmap.MAP_SHARED,
+		prot=mmap.PROT_READ | mmap.PROT_WRITE,
+	)
+	return buf, buf_fd
+
+
 def render_output(wl_connection, output):
+	print(f"Output: Start render")
 	output.render_pending = False
-	# TODO: buffer creation, attach, commit etc.
-	print(f"Output: Need render")
+	stride = output.width * 4
+	size = stride * output.height
+	buf, buf_fd = create_shared_frame_buffer(size)
+	shm_pool = wl_connection.create_object(WaylandShmPool)
+	wl_connection.enqueue_out_message(
+		wl_connection.shm.create_pool(shm_pool.object_id, buf_fd, size)
+	)
+	wl_buf = wl_connection.create_object(WaylandBuffer)
+	wl_connection.enqueue_out_message(
+		shm_pool.create_buffer(
+			wl_buf.object_id,
+			0,
+			output.width,
+			output.height,
+			stride,
+			1
+		)
+	)
+	buf[:] = b"\x00\xff\x00\x00" * (output.width * output.height)
+	wl_connection.enqueue_out_message(
+		output.surface.attach(wl_buf.object_id, 0, 0)
+	)
+	wl_connection.enqueue_out_message(
+		output.surface.damage(0, 0, output.width, output.height)
+	)
+	wl_connection.enqueue_out_message(
+			output.surface.commit()
+		)
 
 
 def handle_new_output(wl_connection, output):
