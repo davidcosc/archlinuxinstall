@@ -245,7 +245,7 @@ class WaylandConnection:
 				setattr(self, attr, None)
 				return object_id
 		for output in self.outputs:
-			for attr in ("wl_output"):
+			for attr in ("wl_output", "surface", "layer_surface"):
 				obj = getattr(output, attr)
 				if obj and obj.object_id == object_id:
 					setattr(output, attr, None)
@@ -271,7 +271,7 @@ class WaylandConnection:
 			return struct.pack("=I", len_data) + data
 		return struct.pack("=I", value)
 
-	def enqueue_out_message(self, request):
+	def enqueue_out_message(self, request, post_request=()):
 		object_id, opcode, args, arg_types = request
 		type_arg_tuples = []
 		aux = None
@@ -291,7 +291,7 @@ class WaylandConnection:
 		header = struct.pack("=II", object_id, (size << 16) | opcode)
 		encoded_msg = header + encoded_args
 		print(f"C -> S: {encoded_msg.hex()}", flush=True)
-		msg = (encoded_msg, aux)
+		msg = (encoded_msg, aux, post_request)
 		self.out_queue.append(msg)
 		return msg
 
@@ -356,7 +356,7 @@ class WaylandConnection:
 
 	def flush_out_queue(self):
 		while self.out_queue:
-			data, aux = self.out_queue.popleft()
+			data, aux, post_request = self.out_queue.popleft()
 			auxdata = [aux] if aux else []
 			num_sent = 0
 			while num_sent < len(data):
@@ -364,6 +364,9 @@ class WaylandConnection:
 					[data[num_sent:]],
 					auxdata if num_sent == 0 else []
 				)
+			if post_request:
+				func, args = post_request
+				func(*args)
 
 	def fill_in_queue(self):
 		data = os.read(self.sock.fileno(), 4096)
@@ -384,7 +387,17 @@ class WaylandConnection:
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
 # ------------------------------------------------------------------------------
-def create_shared_frame_buffer(size):
+def destroy_shared_memory(buf, buf_fd):
+	print(f"Destroy shared memory: {buf_fd}", flush=True)
+	os.close(buf_fd)
+	buf.close()
+
+
+def render_output(wl_connection, output):
+	print(f"Output: Start render", flush=True)
+	output.render_pending = False
+	stride = output.width * 4
+	size = stride * output.height
 	buf_fd = os.memfd_create("bg_frame_buffer")
 	os.ftruncate(buf_fd, size)
 	buf = mmap.mmap(
@@ -393,20 +406,13 @@ def create_shared_frame_buffer(size):
 		flags=mmap.MAP_SHARED,
 		prot=mmap.PROT_READ | mmap.PROT_WRITE,
 	)
-	return buf, buf_fd
-
-
-def render_output(wl_connection, output):
-	print(f"Output: Start render")
-	output.render_pending = False
-	stride = output.width * 4
-	size = stride * output.height
-	buf, buf_fd = create_shared_frame_buffer(size)
 	shm_pool = wl_connection.create_object(WaylandShmPool)
+	print(f"Output: Create wl_shm_pool {shm_pool.object_id}", flush=True)
 	wl_connection.enqueue_out_message(
 		wl_connection.shm.create_pool(shm_pool.object_id, buf_fd, size)
 	)
 	wl_buf = wl_connection.create_object(WaylandBuffer)
+	print(f"Output: Create wl_buffer {wl_buf.object_id}", flush=True)
 	wl_connection.enqueue_out_message(
 		shm_pool.create_buffer(
 			wl_buf.object_id,
@@ -424,9 +430,12 @@ def render_output(wl_connection, output):
 	wl_connection.enqueue_out_message(
 		output.surface.damage(0, 0, output.width, output.height)
 	)
+	wl_connection.enqueue_out_message(output.surface.commit())
+	wl_connection.enqueue_out_message(wl_buf.destroy())
 	wl_connection.enqueue_out_message(
-			output.surface.commit()
-		)
+		shm_pool.destroy(),
+		post_request=(destroy_shared_memory, (buf, buf_fd))
+	)
 
 
 def handle_new_output(wl_connection, output):
@@ -440,7 +449,7 @@ def handle_new_output(wl_connection, output):
 			output.surface.object_id
 		)
 	)
-	print(f"Output: Create surface {output.surface.object_id}")
+	print(f"Output: Create surface {output.surface.object_id}", flush=True)
 	output.layer_surface = (
 		wl_connection.create_object(ZwlrLayerSurfaceV1)
 	)
@@ -463,7 +472,9 @@ def handle_new_output(wl_connection, output):
 	)
 	print(
 		f"Output: Create layer surface"
-		+ f" {output.layer_surface.object_id}")
+		+ f" {output.layer_surface.object_id}",
+		flush=True
+	)
 	wl_connection.enqueue_out_message(
 		output.layer_surface.set_size(0, 0)
 	)
@@ -477,10 +488,11 @@ def handle_new_output(wl_connection, output):
 # ROUTING AND EVENT HANDLING
 # ------------------------------------------------------------------------------
 def on_closed(wl_connection, ref_object_id):
-	print(f"Closed: {ref_object_id}")
+	print(f"Closed: {ref_object_id}", flush=True)
 
 
 def on_configure(wl_connection, ref_object_id, serial, width, height):
+	print(f"Configure: {serial} {width} {height}", flush=True)
 	output = None
 	for outp in wl_connection.outputs:
 		if outp.layer_surface.object_id == ref_object_id:
@@ -497,7 +509,6 @@ def on_configure(wl_connection, ref_object_id, serial, width, height):
 		wl_connection.task_queue.append(
 			(render_output, (output,))
 		)
-	print(f"Configure: {serial} {width} {height}")
 
 
 def on_scale(wl_connection, ref_object_id, scale):
@@ -512,7 +523,7 @@ def on_scale(wl_connection, ref_object_id, scale):
 		wl_connection.task_queue.append(
 			(render_output, (output,))
 		)
-	print(f"Preferred buffer scale: {scale}")
+	print(f"Preferred buffer scale: {scale}", flush=True)
 
 
 def on_error(wl_connection, ref_object_id, object_id, code, message):
@@ -546,7 +557,8 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 	if wl_object:
 		print(
 			f"Global: {name} {interface} {version}"
-			+ f" bound {wl_object.object_id}"
+			+ f" bound {wl_object.object_id}",
+			flush=True
 		)
 		wl_connection.enqueue_out_message(
 			wl_connection.registry.bind(
@@ -558,7 +570,7 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 		)
 
 def on_done(wl_connection, ref_object_id, callback_data):
-	print(f"Done: {callback_data}")
+	print(f"Done: {callback_data}", flush=True)
 	wl_connection.bound_globals = True
 	for output in wl_connection.outputs:
 		handle_new_output(wl_connection, output)
