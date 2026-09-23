@@ -19,6 +19,7 @@ import os
 import select
 import socket
 import struct
+import time
 from collections import deque
 from pathlib import Path
 from PIL import Image
@@ -115,6 +116,9 @@ class Output:
 		self.preferred_buffer_scale = 1
 		self.configure_serial = None
 		self.render_pending = False
+		self.backgrounds = deque()
+		self.backgrounds.append(b"\x00\xff\x00\x00")
+		self.backgrounds.append(b"\x00\x00\xff\x00")
 
 
 class ZwlrLayerShellV1:
@@ -423,7 +427,7 @@ def render_output(wl_connection, output):
 			1
 		)
 	)
-	buf[:] = b"\x00\xff\x00\x00" * (output.width * output.height)
+	buf[:] = output.backgrounds[0] * (output.width * output.height)
 	wl_connection.enqueue_out_message(
 		output.surface.attach(wl_buf.object_id, 0, 0)
 	)
@@ -576,10 +580,38 @@ def on_done(wl_connection, ref_object_id, callback_data):
 		handle_new_output(wl_connection, output)
 
 
+def on_wakey(wl_connection):
+	for output in wl_connection.outputs:
+		print(f"Wakey: {output.wl_output.object_id}", flush=True)
+		bg = output.backgrounds.popleft()
+		output.backgrounds.append(bg)
+		render_output(wl_connection, output)
+
 
 # ------------------------------------------------------------------------------
 # EVENT LOOP
 # ------------------------------------------------------------------------------
+def event_sleep(duration):
+	rfd, wfd = os.pipe()
+	pid = os.fork()
+	if pid < 0:
+		raise Exception("Event sleep fork")
+	if pid == 0:
+		for i in range(3, 11):
+			if i == wfd:
+				continue
+			try:
+				os.close(i)
+			except OSError:
+				pass
+		time.sleep(duration)
+		os.write(wfd, b"wakey")
+		os.close(wfd)
+		os._exit(0)
+	os.close(wfd)
+	return rfd
+
+
 def main():
 	wl_connection = WaylandConnection()
 	wl_connection.connect()
@@ -599,19 +631,26 @@ def main():
 	wl_connection.enqueue_out_message(
 		wl_display.sync(wl_callback.object_id)
 	)
+	sleep_fd = event_sleep(60)
+	event_fds = [wl_connection.sock.fileno(), sleep_fd]
 	while True:
 		if wl_connection.task_queue:
 			wl_connection.work_tasks()
 		if wl_connection.out_queue:
 			wl_connection.flush_out_queue()
 		rlist, _, _ = select.select(
-			[wl_connection.sock.fileno()],
+			event_fds,
 			[],
 			[]
 		)
-		if rlist:
+		if wl_connection.sock.fileno() in rlist:
 			wl_connection.fill_in_queue()
 			wl_connection.dispatch()
+		elif sleep_fd in rlist:
+			os.close(sleep_fd)
+			sleep_fd = event_sleep(60)
+			event_fds[1] = sleep_fd
+			on_wakey(wl_connection)
 
 
 if __name__ == "__main__":
