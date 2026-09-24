@@ -221,6 +221,7 @@ class WaylandConnection:
 		self.out_queue = deque()
 		self.in_queue = deque()
 		self.task_queue = deque()
+		self.sleep_fd = -1
 
 	def create_object(self, interface):
 		if self.released_object_ids:
@@ -387,6 +388,24 @@ class WaylandConnection:
 		while self.task_queue:
 			task, args = self.task_queue.popleft()
 			task(self, *args)
+
+	def loop(self, sleep_callback):
+		while True:
+			if self.task_queue:
+				self.work_tasks()
+			if self.out_queue:
+				self.flush_out_queue()
+			rlist, _, _ = select.select(
+				[self.sock.fileno(), self.sleep_fd],
+				[],
+				[]
+			)
+			if self.sock.fileno() in rlist:
+				self.fill_in_queue()
+				self.dispatch()
+			elif self.sleep_fd in rlist:
+				sleep_callback(self)
+
 
 # ------------------------------------------------------------------------------
 # OUTPUT HANDLING
@@ -573,6 +592,7 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 			)
 		)
 
+
 def on_done(wl_connection, ref_object_id, callback_data):
 	print(f"Done: {callback_data}", flush=True)
 	wl_connection.bound_globals = True
@@ -580,17 +600,6 @@ def on_done(wl_connection, ref_object_id, callback_data):
 		handle_new_output(wl_connection, output)
 
 
-def on_wakey(wl_connection):
-	for output in wl_connection.outputs:
-		print(f"Wakey: {output.wl_output.object_id}", flush=True)
-		bg = output.backgrounds.popleft()
-		output.backgrounds.append(bg)
-		render_output(wl_connection, output)
-
-
-# ------------------------------------------------------------------------------
-# EVENT LOOP
-# ------------------------------------------------------------------------------
 def event_sleep(duration):
 	rfd, wfd = os.pipe()
 	pid = os.fork()
@@ -612,6 +621,19 @@ def event_sleep(duration):
 	return rfd
 
 
+def on_wakey(wl_connection):
+	os.close(wl_connection.sleep_fd)
+	wl_connection.sleep_fd = event_sleep(60)
+	for output in wl_connection.outputs:
+		print(f"Wakey: {output.wl_output.object_id}", flush=True)
+		bg = output.backgrounds.popleft()
+		output.backgrounds.append(bg)
+		render_output(wl_connection, output)
+
+
+# ------------------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------------------
 def main():
 	wl_connection = WaylandConnection()
 	wl_connection.connect()
@@ -631,26 +653,8 @@ def main():
 	wl_connection.enqueue_out_message(
 		wl_display.sync(wl_callback.object_id)
 	)
-	sleep_fd = event_sleep(60)
-	event_fds = [wl_connection.sock.fileno(), sleep_fd]
-	while True:
-		if wl_connection.task_queue:
-			wl_connection.work_tasks()
-		if wl_connection.out_queue:
-			wl_connection.flush_out_queue()
-		rlist, _, _ = select.select(
-			event_fds,
-			[],
-			[]
-		)
-		if wl_connection.sock.fileno() in rlist:
-			wl_connection.fill_in_queue()
-			wl_connection.dispatch()
-		elif sleep_fd in rlist:
-			os.close(sleep_fd)
-			sleep_fd = event_sleep(60)
-			event_fds[1] = sleep_fd
-			on_wakey(wl_connection)
+	wl_connection.sleep_fd = event_sleep(60)
+	wl_connection.loop(on_wakey)
 
 
 if __name__ == "__main__":
