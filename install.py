@@ -495,6 +495,9 @@ def setup_niri():
 		parents=True,
 		exist_ok=True
 	)
+	images_path = Path(f"/home/{user}/images/")
+	images_path.mkdir(parents=True, exist_ok=True)
+	files = list(Path(".").glob("wall*"))
 
 	cmds = [
 		["/usr/bin/cp", "./greetd.toml", str(greetd_config_path)],
@@ -511,7 +514,7 @@ def setup_niri():
 			"./wl_wallpaper_client.py",
 			"/usr/bin/wallpaper_client"
 		],
-		["/usr/bin/cp", "./wall1.jpg", f"/home/{user}/wall1.jpg"],
+		["/usr/bin/cp", *[str(f) for f in files], str(images_path)],
 		["/usr/bin/chmod", "755", "/usr/bin/wallpaper_client"],
 		["/usr/bin/systemctl", "enable", "greetd"]
 	]

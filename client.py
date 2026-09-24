@@ -116,9 +116,8 @@ class Output:
 		self.preferred_buffer_scale = 1
 		self.configure_serial = None
 		self.render_pending = False
-		self.backgrounds = deque()
-		self.backgrounds.append(b"\x00\xff\x00\x00")
-		self.backgrounds.append(b"\x00\x00\xff\x00")
+		self.backgrounds = None
+		self.bg_is_image = False
 
 
 class ZwlrLayerShellV1:
@@ -222,6 +221,10 @@ class WaylandConnection:
 		self.in_queue = deque()
 		self.task_queue = deque()
 		self.sleep_fd = -1
+		self.backgrounds = deque(
+			[b"\xff\xff\xff\x00", b"\x00\x00\x00\x00" ]
+		)
+		self.bg_is_image = False
 
 	def create_object(self, interface):
 		if self.released_object_ids:
@@ -416,23 +419,52 @@ def destroy_shared_memory(buf, buf_fd):
 	buf.close()
 
 
+def draw_image(path, width, height):
+	image = Image.open(path).convert("RGB")
+	scale = max(
+		width / image.width,
+		height / image.height
+	)
+	new_width = round(image.width * scale)
+	new_height = round(image.height * scale)
+	image = image.resize(
+		(new_width, new_height),
+		Image.Resampling.LANCZOS
+	)
+	left = (new_width - width) // 2
+	top = (new_height - height) // 2
+	image = image.crop((
+		left,
+		top,
+		left + width,
+		top + height
+	))
+	return image.tobytes("raw", "BGRX")
+
+
 def render_output(wl_connection, output):
 	print(f"Output: Start render", flush=True)
 	output.render_pending = False
-	stride = output.width * 4
-	size = stride * output.height
+	buffer_width = output.width * output.preferred_buffer_scale
+	buffer_height = output.height * output.preferred_buffer_scale
+	buffer_stride = buffer_width * 4
+	buffer_size = buffer_stride * buffer_height
 	buf_fd = os.memfd_create("bg_frame_buffer")
-	os.ftruncate(buf_fd, size)
+	os.ftruncate(buf_fd, buffer_size)
 	buf = mmap.mmap(
 		buf_fd,
-		size,
+		buffer_size,
 		flags=mmap.MAP_SHARED,
 		prot=mmap.PROT_READ | mmap.PROT_WRITE,
 	)
 	shm_pool = wl_connection.create_object(WaylandShmPool)
 	print(f"Output: Create wl_shm_pool {shm_pool.object_id}", flush=True)
 	wl_connection.enqueue_out_message(
-		wl_connection.shm.create_pool(shm_pool.object_id, buf_fd, size)
+		wl_connection.shm.create_pool(
+			shm_pool.object_id,
+			buf_fd,
+			buffer_size
+		)
 	)
 	wl_buf = wl_connection.create_object(WaylandBuffer)
 	print(f"Output: Create wl_buffer {wl_buf.object_id}", flush=True)
@@ -440,13 +472,23 @@ def render_output(wl_connection, output):
 		shm_pool.create_buffer(
 			wl_buf.object_id,
 			0,
-			output.width,
-			output.height,
-			stride,
+			buffer_width,
+			buffer_height,
+			buffer_stride,
 			1
 		)
 	)
-	buf[:] = output.backgrounds[0] * (output.width * output.height)
+	if output.bg_is_image:
+		buf[:] = draw_image(
+			output.backgrounds[0],
+			buffer_width,
+			buffer_height
+		)
+	else:
+		buf[:] = output.backgrounds[0] * (buffer_width * buffer_height)
+	wl_connection.enqueue_out_message(
+		output.surface.set_buffer_scale(output.preferred_buffer_scale)
+	)
 	wl_connection.enqueue_out_message(
 		output.surface.attach(wl_buf.object_id, 0, 0)
 	)
@@ -459,9 +501,13 @@ def render_output(wl_connection, output):
 		shm_pool.destroy(),
 		post_request=(destroy_shared_memory, (buf, buf_fd))
 	)
+	wl_connection.destroy_object(shm_pool.object_id)
+	wl_connection.destroy_object(wl_buf.object_id)
 
 
 def handle_new_output(wl_connection, output):
+	output.backgrounds = wl_connection.backgrounds
+	output.bg_is_image = wl_connection.bg_is_image
 	output.surface = wl_connection.create_object(WaylandSurface)
 	wl_connection.listen(
 		output.surface.preferred_buffer_scale(),
@@ -636,6 +682,13 @@ def on_wakey(wl_connection):
 # ------------------------------------------------------------------------------
 def main():
 	wl_connection = WaylandConnection()
+	jpgs = [
+		p for p in (Path.home() / "images").rglob("*")
+		if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
+	]
+	if jpgs:
+		wl_connection.bg_is_image = True
+		wl_connection.backgrounds = deque(jpgs)
 	wl_connection.connect()
 	wl_display = wl_connection.create_object(WaylandDisplay)
 	wl_connection.display = wl_display
