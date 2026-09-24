@@ -198,7 +198,7 @@ def partition(device):
 	)
 	partitions = result.splitlines()[2:]
 	os.write(1, str(partitions).encode("utf-8") + b"\n")
-	time.sleep(5)
+	time.sleep(15)
 	cmds = [
 		["/usr/bin/mkfs.fat", "-F", "32", partitions[0]],
 		["/usr/bin/mkswap", partitions[1]],
@@ -304,7 +304,8 @@ def setup_base_system():
 		'/usr/bin/pacman -S --noconfirm grub efibootmgr\n',
 		'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB\n',
 		'grub-mkconfig -o /boot/grub/grub.cfg\n',
-		'/usr/bin/pacman -S --noconfirm sudo\n',
+		'/usr/bin/pacman -S --noconfirm --needed sudo\n',
+		"/usr/bin/echo '%wheel ALL=(ALL:ALL) ALL' >> /etc/sudoers"
 		'exit\n'
 	]
 	ret_code, _ = subprocess_output(
@@ -456,7 +457,8 @@ def setup_niri():
 		"niri",
 		"alacritty",
 		"fuzzel",
-		"wiremix"
+		"wiremix",
+		"python-pip"
 	]
 
 	ret_code, _ = subprocess_output(
@@ -516,7 +518,17 @@ def setup_niri():
 		],
 		["/usr/bin/cp", *[str(f) for f in files], str(images_path)],
 		["/usr/bin/chmod", "755", "/usr/bin/wallpaper_client"],
-		["/usr/bin/systemctl", "enable", "greetd"]
+		["/usr/bin/systemctl", "enable", "greetd"],
+		[
+			"/usr/bin/python",
+			"-m",
+			"pip",
+			"install",
+			"--break-system-packages",
+			"--root-user-action=ignore",
+			"Pillow"
+		],
+		["/usr/bin/chown", "-R", "shen:users", "/home/shen"]
 	]
 
 	for cmd in cmds:

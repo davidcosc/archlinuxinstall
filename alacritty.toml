@@ -1,6 +1,6 @@
 [window]
 decorations = "None"
-opacity = 0.0
+opacity = 0.85
 
 [font]
 size = 14.0
@@ -10,4 +10,5 @@ family = "Maple Mono"
 style = "Bold"
 
 [colors.primary]
-foreground = "#c586c0"
+foreground = "#6a6a6d"
+background = "#1c1b22"

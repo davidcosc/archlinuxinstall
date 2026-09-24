@@ -4,10 +4,14 @@ From https://wayland-book.com/protocol-design/high-level.html:
 When processing this XML file, we assign each request and event an opcode in 
 the order that they appear, numbered from zero and incrementing independently. 
 Combined with the list of arguments, you can decode the request or event when 
-it comes in over the wire, and based on the documentation shipped in the XML 
-file you can decide how to program your software to behave accordingly. This 
-usually comes in the form of code generation — we'll talk about how libwayland 
-does this in chapter 3.
+it comes in over the wire.
+
+From https://wayland.freedesktop.org/docs/book/Protocol.html#wire-format:
+new_id
+    The 32-bit object ID. Generally, the interface used for the new object is
+    inferred from the xml, but in the case where it’s not specified, a new_id
+    is preceded by a string specifying the interface name, and a uint specifying
+    the version.
 """
 
 import mmap
@@ -17,625 +21,336 @@ import socket
 import struct
 import time
 from collections import deque
-from enum import Enum, IntFlag
 from pathlib import Path
 from PIL import Image
 
 
-class WlBuffer:
-	"""
-	<interface name="wl_buffer" version="1">
-		<request name="destroy" type="destructor">
-		</request>
+class WaylandBuffer:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<event name="release">
-		</event>
-	</interface>
+	def destroy(self):
+		return (self.object_id, 0, (), ())
 
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
+	def release(self):
+		return (self.object_id, 0, ())
 
 
-class WlShmPool:
-	"""
-	<interface name="wl_shm_pool" version="2">
-		<request name="create_buffer">
-			<arg name="id" type="new_id" interface="wl_buffer" summary="buffer to create"/>
-			<arg name="offset" type="int" summary="buffer byte offset within the pool"/>
-			<arg name="width" type="int" summary="buffer width, in pixels"/>
-			<arg name="height" type="int" summary="buffer height, in pixels"/>
-			<arg name="stride" type="int" summary="number of bytes from the beginning of one row to the beginning of the next row"/>
-			<arg name="format" type="uint" enum="wl_shm.format" summary="buffer pixel format"/>
-		</request>
+class WaylandShmPool:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<request name="destroy" type="destructor"/>
-
-		<request name="resize">
-			<arg name="size" type="int" summary="new size of the pool, in bytes"/>
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.buf_fd = -1
-		self.buf = None
-
-	def create_shared_frame_buffer(self, size):
-		self.buf_fd = os.memfd_create("bg_frame_buffer")
-		os.ftruncate(self.buf_fd, size)
-		self.buf = mmap.mmap(
-			self.buf_fd,
-			size,
-			flags=mmap.MAP_SHARED,
-			prot=mmap.PROT_READ | mmap.PROT_WRITE,
-		)
-
-	def schedule_request_create_buffer(
-		self,
-		new_id,
-		offset,
-		width,
-		height,
-		stride,
-		format
-	):
-		opcode = 0
-		self.display.schedule_request(
+	def create_buffer(self, id, offset, width, height, stride, format):
+		return (
 			self.object_id,
-			opcode,
-			new_id,
-			offset,
-			width,
-			height,
-			stride,
-			format
+			0,
+			(id, offset, width, height, stride, format),
+			("new_id", "int", "int", "int", "int", "uint")
 		)
+
+	def destroy(self):
+		return (self.object_id, 1, (), ())
 
 
 class ZwlrLayerSurfaceV1:
-	"""
-	You create wl_surface.
-	You call zwlr_layer_shell_v1.get_layer_surface(...).
-	This assigns the layer-surface role to your wl_surface.
-	You configure the layer surface with requests such as set_size, set_anchor, etc.
-	You wl_surface.commit() with no buffer attached.
-	Compositor sends zwlr_layer_surface_v1.configure.
-	You acknowledge the configure with ack_configure.
-	You create/obtain an actual wl_buffer through something like wl_shm.
-	You attach that buffer to your existing wl_surface.
-	You wl_surface.commit() again, this time with the buffer attached.
-	<interface name="zwlr_layer_surface_v1" version="4">
-		<request name="set_size">
-			<arg name="width" type="uint"/>
-			<arg name="height" type="uint"/>
-		</request>
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<request name="set_anchor">
-			<arg name="anchor" type="uint" enum="anchor"/>
-		</request>
+	def set_size(self, width, height):
+		return (self.object_id, 0, (width, height), ("uint", "uint"))
 
-		<request name="set_exclusive_zone">
-			<arg name="zone" type="int"/>
-		</request>
+	def set_anchor(self, anchor):
+		return (self.object_id, 1, (anchor,), ("uint",))
 
-		<request name="set_margin">
-			<arg name="top" type="int"/>
-			<arg name="right" type="int"/>
-			<arg name="bottom" type="int"/>
-			<arg name="left" type="int"/>
-		</request>
+	def ack_configure(self, serial):
+		return (self.object_id, 6, (serial,), ("uint",))
 
-		<enum name="keyboard_interactivity">
-			<entry name="none" value="0">
-			</entry>
-			<entry name="exclusive" value="1">
-			</entry>
-			<entry name="on_demand" value="2" since="4">
-			</entry>
-		</enum>
+	def configure(self):
+		return(self.object_id, 0, ("uint", "uint", "uint"))
 
-		<request name="set_keyboard_interactivity">
-			<arg name="keyboard_interactivity" type="uint" enum="keyboard_interactivity"/>
-		</request>
+	def closed(self):
+		return(self.object_id, 1, ())
 
-		<request name="get_popup">
-			<arg name="popup" type="object" interface="xdg_popup"/>
-		</request>
 
-		<request name="ack_configure">
-			<arg name="serial" type="uint" summary="the serial from the configure event"/>
-		</request>
+class WaylandSurface:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<request name="destroy" type="destructor"/>
+	def destroy(self):
+		return (self.object_id, 0, (), ())
 
-		<event name="configure">
-			<arg name="serial" type="uint"/>
-			<arg name="width" type="uint"/>
-			<arg name="height" type="uint"/>
-		</event>
+	def attach(self, buffer, x, y):
+		return (
+			self.object_id,
+			1,
+			(buffer, x, y),
+			("object", "int", "int")
+		)
 
-		<event name="closed"/>
+	def damage(self, x, y, width, height):
+		return (
+			self.object_id,
+			2,
+			(x, y, width, height),
+			("int", "int", "int", "int")
+		)
 
-		<enum name="anchor" bitfield="true">
-			<entry name="top" value="1" summary="the top edge of the anchor rectangle"/>
-			<entry name="bottom" value="2" summary="the bottom edge of the anchor rectangle"/>
-			<entry name="left" value="4" summary="the left edge of the anchor rectangle"/>
-			<entry name="right" value="8" summary="the right edge of the anchor rectangle"/>
-		</enum>
+	def commit(self):
+		return (self.object_id, 6, (), ())
 
-		<request name="set_layer" since="2">
-			<arg name="layer" type="uint" enum="zwlr_layer_shell_v1.layer" summary="layer to move this surface to"/>
-		</request>
-	</interface>
-	"""
+	def set_buffer_scale(self, scale):
+		return (self.object_id, 8, (scale,), ("int",))
 
-	class Anchor(IntFlag):
-		TOP = 1
-		BOTTOM = 2
-		LEFT = 4
-		RIGHT = 8
+	def preferred_buffer_scale(self):
+		return (self.object_id, 2, ("int",))
 
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.configured = False
+
+class Output:
+	def __init__(self, wl_output, name):
+		self.name = name
+		self.wl_output = wl_output
+		self.surface = None
+		self.layer_surface = None
 		self.width = 0
 		self.height = 0
-		self.stride = 0
-		self.size = 0
-		self.serial = -1
-
-	def on_event_configure(self, serial, width, height):
-		self.configured = True
-		self.width = width
-		self.height = height
-		self.stride = self.width * 4
-		self.size = self.stride * self.height
-		self.serial = serial
-		print(f"Rcvd conf s {serial} w {width}, h {height}!", flush=True)
-
-	def register_event_configure(self):
-		opcode = 0
-		arg_types = (int, int, int)
-		self.display.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.on_event_configure
-		)
-
-	def reqister_request_ack_configure(self, serial):
-		opcode = 6
-		self.display.schedule_request(self.object_id, opcode, serial)
-
-	def schedule_request_set_size(self, width, height):
-		opcode = 0
-		self.display.schedule_request(
-			self.object_id,
-			opcode,
-			width,
-			height
-		)
-
-	def schedule_request_set_anchor(self, anchor):
-		opcode = 1
-		self.display.schedule_request(self.object_id, opcode, anchor)
-
-
-class WlSurface:
-	"""
-	<interface name="wl_surface" version="4">
-		<request name="destroy" type="destructor">
-		</request>
-
-		<request name="attach">
-			<arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-		</request>
-
-		<request name="damage">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-		</request>
-
-		<request name="frame">
-			<arg name="callback" type="new_id" interface="wl_callback"/>
-		</request>
-
-		<request name="set_opaque_region">
-			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
-		</request>
-
-		<request name="set_input_region">
-			<arg name="region" type="object" interface="wl_region" allow-null="true"/>
-		</request>
-
-		<request name="commit">
-		</request>
-
-		<event name="enter">
-			<arg name="output" type="object" interface="wl_output"/>
-		</event>
-
-		<event name="leave">
-			<arg name="output" type="object" interface="wl_output"/>
-		</event>
-
-		<request name="set_buffer_transform" since="2">
-			<arg name="transform" type="int"/>
-		</request>
-
-		<request name="set_buffer_scale" since="3">
-			<arg name="scale" type="int"/>
-		</request>
-
-		<request name="damage_buffer" since="4">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-
-	def schedule_request_attach(self, buffer, x, y):
-		opcode = 1
-		self.display.schedule_request(
-			self.object_id,
-			opcode,
-			buffer,
-			x,
-			y
-		)
-
-	def schedule_request_commit(self):
-		opcode = 6
-		self.display.schedule_request(self.object_id, opcode)
-
-
-class WlOutput:
-	"""
-	<interface name="wl_output" version="2">
-		<enum name="subpixel">
-			<entry name="unknown" value="0"/>
-			<entry name="none" value="1"/>
-			<entry name="horizontal_rgb" value="2"/>
-			<entry name="horizontal_bgr" value="3"/>
-			<entry name="vertical_rgb" value="4"/>
-			<entry name="vertical_bgr" value="5"/>
-		</enum>
-
-		<enum name="transform">
-			<entry name="normal" value="0"/>
-			<entry name="90" value="1"/>
-			<entry name="180" value="2"/>
-			<entry name="270" value="3"/>
-			<entry name="flipped" value="4"/>
-			<entry name="flipped_90" value="5"/>
-			<entry name="flipped_180" value="6"/>
-			<entry name="flipped_270" value="7"/>
-		</enum>
-
-		<event name="geometry">
-			<arg name="x" type="int"/>
-			<arg name="y" type="int"/>
-			<arg name="physical_width" type="int"/>
-			<arg name="physical_height" type="int"/>
-			<arg name="subpixel" type="int" enum="subpixel"/>
-			<arg name="make" type="string"/>
-			<arg name="model" type="string"/>
-			<arg name="transform" type="int" enum="transform"/>
-		</event>
-
-		<enum name="mode" bitfield="true">
-			<entry name="current" value="0x1"/>
-			<entry name="preferred" value="0x2"/>
-		</enum>
-
-		<event name="mode">
-			<arg name="flags" type="uint" enum="mode"/>
-			<arg name="width" type="int"/>
-			<arg name="height" type="int"/>
-			<arg name="refresh" type="int"/>
-		</event>
-
-		<event name="done" since="2">
-		</event>
-
-		<event name="scale" since="2">
-			<arg name="factor" type="int"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display, name):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.name = name
-
-
-class WlShm:
-	"""
-	<interface name="wl_shm" version="1">
-		<enum name="error">
-			<entry name="invalid_format" value="0" summary="buffer format is not known"/>
-			<entry name="invalid_stride" value="1" summary="invalid size or stride during pool or buffer creation"/>
-			<entry name="invalid_fd" value="2" summary="mmapping the file descriptor failed"/>
-		</enum>
-
-		<enum name="format">
-			<!-- The drm format codes match the #defines in drm_fourcc.h.
-				The formats actually supported by the compositor will be
-				reported by the format event. -->
-		</enum>
-
-		<request name="create_pool">
-			<arg name="id" type="new_id" interface="wl_shm_pool"/>
-			<arg name="fd" type="fd"/>
-			<arg name="size" type="int"/>
-		</request>
-
-		<event name="format">
-			<arg name="format" type="uint" enum="format"/>
-		</event>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.format = 1
-
-	def schedule_request_create_pool(self, new_id, fd, size):
-		opcode = 0
-		aux = (
-			socket.SOL_SOCKET,
-			socket.SCM_RIGHTS,
-			struct.pack("i", fd)
-		)
-		self.display.schedule_request(
-			self.object_id,
-			opcode,
-			new_id,
-			size,
-			aux=aux
-		)
+		self.preferred_buffer_scale = 1
+		self.configure_serial = None
+		self.render_pending = False
+		self.backgrounds = None
+		self.bg_is_image = False
 
 
 class ZwlrLayerShellV1:
-	"""
-	<interface name="zwlr_layer_shell_v1" version="4">
-		<request name="get_layer_surface">
-			<arg name="id" type="new_id" interface="zwlr_layer_surface_v1"/>
-			<arg name="surface" type="object" interface="wl_surface"/>
-			<arg name="output" type="object" interface="wl_output" allow-null="true"/>
-			<arg name="layer" type="uint" enum="layer" summary="layer to add this surface to"/>
-			<arg name="namespace" type="string" summary="namespace for the layer surface"/>
-		</request>
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<enum name="layer">
-			<entry name="background" value="0"/>
-			<entry name="bottom" value="1"/>
-			<entry name="top" value="2"/>
-			<entry name="overlay" value="3"/>
-		</enum>
-
-		<request name="destroy" type="destructor" since="3">
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-
-	def schedule_request_get_layer_surface(
-		self,
-		new_id,
-		surface,
-		output,
-		layer,
-		namespace
-	):
-		opcode = 0
-		self.display.schedule_request(
+	def get_layer_surface(self, id, surface, output, layer, namespace):
+		return (
 			self.object_id,
-			opcode,
-			new_id,
-			surface,
-			output,
-			layer,
-			namespace
+			0,
+			(id, surface, output, layer, namespace),
+			("new_id", "object", "object", "uint", "string")
 		)
 
 
-class WlCompositor:
-	"""
-	<interface name="wl_compositor" version="6">
-		<request name="create_surface">
-			<arg name="id" type="new_id" interface="wl_surface" summary="the new surface"/>
-		</request>
-
-		<request name="create_region">
-			<arg name="id" type="new_id" interface="wl_region" summary="the new region"/>
-		</request>
-	</interface>
-	"""
-
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-
-	def schedule_request_create_surface(self, new_id):
-		opcode = 0
-		self.display.schedule_request(self.object_id, opcode, new_id)
+class WaylandOutput:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
 
-class WlCallback:
-	"""
-	<interface name="wl_callback" version="1">
-		<event name="done">
-			<arg name="callback_data" type="uint" summary="request-specific data for the wl_callback"/>
-		</event>
-	</interface>
-	"""
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
+class WaylandShm:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-	def register_event_done(self, on_done):
-		opcode = 0
-		arg_types = (int,)
-		self.display.register_event(
+	def create_pool(self, id, fd, size):
+		return (
 			self.object_id,
-			opcode,
-			arg_types,
-			on_done
+			0,
+			(id, fd, size),
+			("new_id", "fd", "int")
 		)
 
 
-class WlRegistry:
-	"""
-	<interface name="wl_registry" version="1">
-		<request name="bind">
-			<arg name="name" type="uint" summary="unique name for the object"/>
-			<arg name="id" type="new_id"/>
-		</request>
+class WaylandCompositor:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<event name="global">
-			<arg name="name" type="uint"/>
-			<arg name="interface" type="string"/>
-			<arg name="version" type="uint"/>
-		</event>
+	def create_surface(self, id):
+		return (self.object_id, 0, (id,), ("new_id",))
 
-		<event name="global_remove">
-			<arg name="name" type="uint"/>
-		</event>
-	</interface>
-	"""
 
-	def __init__(self, display):
-		self.display = display
-		self.object_id = self.display.get_next_object_id()
-		self.global_remove_events = deque()
-		self.global_events = deque()
-		self.output_events = deque()
-		self.done = False
+class WaylandCallback:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-	def on_event_done(self, callback_data):
-		self.done = True
-		print(f"Received registry done")
+	def done(self):
+		return (self.object_id, 0, ("uint",))
 
-	def on_event_global(self, name, interface, version):
-		print(f"Adding global event: {name}, {interface}, {version}", flush=True)
-		if interface == "wl_output":
-			self.output_events.append((interface, name, version))
 
-		self.global_events.append((interface, name, version))
-		
-	def register_event_global(self):
-		opcode = 0
-		arg_types = (int, str, int)
-		self.display.register_event(
+class WaylandRegistry:
+	def __init__(self, object_id):
+		self.object_id = object_id
+
+	def bind(self, name, interface, version, id):
+		return (
 			self.object_id,
-			opcode,
-			arg_types,
-			self.on_event_global
+			0,
+			(name, interface, version, id),
+			("uint", "string", "uint", "new_id")
 		)
 
-	def on_event_global_remove(self, name):
-		self.global_remove_events.append(name)
+	def global_(self):
+		return (self.object_id, 0, ("uint", "string", "uint"))
 
-	def register_event_global_remove(self, name):
-		opcode = 1
-		arg_types = (int,)
-		self.display.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.on_event_global_remove
-		)
-
-	def schedule_request_bind(self, name, interface, version, new_id):
-		opcode = 0
-		self.display.schedule_request(
-			self.object_id,
-			opcode,
-			name,
-			interface,
-			version,
-			new_id
-		)
+	def global_remove(self):
+		return (self.object_id, 1, ("uint",))
 
 
-class WlDisplay:
-	"""
-	<interface name="wl_display" version="1">
-		<request name="sync">
-			<arg name="callback" type="new_id" interface="wl_callback"/>
-		</request>
+class WaylandDisplay:
+	def __init__(self, object_id):
+		self.object_id = object_id
 
-		<request name="get_registry">
-			<arg name="registry" type="new_id" interface="wl_registry"/>
-		</request>
+	def sync(self, callback):
+		return (self.object_id, 0, (callback,), ("new_id",))
 
-		<event name="error">
-			<arg name="object_id" type="object"/>
-			<arg name="code" type="uint"/>
-			<arg name="message" type="string"/>
-		</event>
+	def get_registry(self, registry):
+		return (self.object_id, 1, (registry,), ("new_id",))
 
-		<event name="delete_id">
-			<description summary="acknowledge object ID deletion">
-				This event is used internally by the object ID management
-				logic.  When a client deletes an object, the server will send
-				this event to acknowledge that it has seen the delete request.
-				When the client receive this event, it will know that it can
-				safely reuse the object ID.
-			</description>
-			<arg name="id" type="uint" />
-		</event>
-	</interface>
-	"""
+	def error(self):
+		return (self.object_id, 0, ("object", "uint", "string"))
 
+	def delete_id(self):
+		return (self.object_id, 1, ("uint",))
+
+
+class WaylandConnection:
 	def __init__(self):
-		self.socket = None
+		self.sock = None
 		self.next_object_id = 0
 		self.released_object_ids = deque()
-		self.object_id = self.get_next_object_id()
-		self.objects = {}
-		self.tasks = deque()
-		self.out_messages = deque()
-		self.in_messages = deque()
-		self.callback_lookups = [None] * (40 * 16)
+		self.listeners = [None] * 20 * 16
+		self.display = None
+		self.registry = None
+		self.callback = None
+		self.compositor = None
+		self.shm = None
+		self.layer_shell = None
+		self.bound_globals = False
+		self.outputs = []
+		self.out_queue = deque()
+		self.in_queue = deque()
+		self.task_queue = deque()
+		self.sleep_fd = -1
+		self.backgrounds = deque(
+			[b"\xff\xff\xff\x00", b"\x00\x00\x00\x00" ]
+		)
+		self.bg_is_image = False
 
-	def get_next_object_id(self):
+	def create_object(self, interface):
 		if self.released_object_ids:
-			return self.released_object_ids.popleft()
+			object_id = self.released_object_ids.popleft()
+		else:
+			self.next_object_id += 1
+			object_id = self.next_object_id
+			if object_id > 0xfeffffff:
+				raise RuntimeError("Ran out of object ids")
+		return interface(object_id)
 
-		self.next_object_id += 1
+	def destroy_object(self, object_id):
+		self.released_object_ids.append(object_id)
+		for i in range(16):
+			self.listeners[(object_id << 4) | i] = None
+		for attr in (
+			"display",
+			"registry",
+			"compositor",
+			"callback",
+			"shm",
+			"layer_shell"
+		):
+			obj = getattr(self, attr)
+			if obj and obj.object_id == object_id:
+				setattr(self, attr, None)
+				return object_id
+		for output in self.outputs:
+			for attr in ("wl_output", "surface", "layer_surface"):
+				obj = getattr(output, attr)
+				if obj and obj.object_id == object_id:
+					setattr(output, attr, None)
+					return object_id
+		return object_id
+		
+	def listen(self, event, callback):
+		object_id, opcode, arg_types = event
+		index = (object_id << 4) | opcode
+		self.listeners[index] = (callback, arg_types)
+		return index
 
-		if self.next_object_id > 0xfeffffff:
-			raise Exception("Ran out of client object ids")
+	def pad4(self, n):
+		return (4 - (n % 4)) % 4
 
-		return self.next_object_id
+	def encode_arg(self, arg_type, value):
+		if value is None:
+			return struct.pack("=I", 0)
+		if arg_type == "string":
+			data = value.encode("utf-8") + b"\x00"
+			len_data = len(data)
+			data = data + b"\x00" * self.pad4(len_data)
+			return struct.pack("=I", len_data) + data
+		return struct.pack("=I", value)
+
+	def enqueue_out_message(self, request, post_request=()):
+		object_id, opcode, args, arg_types = request
+		type_arg_tuples = []
+		aux = None
+		for index, arg_type in enumerate(arg_types):
+			if arg_type == "fd":
+				aux = (
+					socket.SOL_SOCKET,
+					socket.SCM_RIGHTS,
+					struct.pack("=i", args[index])
+				)
+				continue
+			type_arg_tuples.append((arg_type, args[index]))
+		encoded_args = b"".join(
+			self.encode_arg(k, v) for k, v in type_arg_tuples
+		)
+		size = 8 + len(encoded_args)
+		header = struct.pack("=II", object_id, (size << 16) | opcode)
+		encoded_msg = header + encoded_args
+		print(f"C -> S: {encoded_msg.hex()}", flush=True)
+		msg = (encoded_msg, aux, post_request)
+		self.out_queue.append(msg)
+		return msg
+
+	def decode_args(self, args, arg_types):
+		offset = 0
+		decoded_args = []
+		for arg_type in arg_types:
+			first_int = struct.unpack(
+				"=I",
+				args[offset:offset + 4]
+			)[0]
+			offset += 4
+			if arg_type == "string":
+				slen = first_int
+				sbytes = args[offset:offset + slen]
+				decoded_args.append(sbytes[:-1].decode("utf-8"))
+				offset += slen + self.pad4(slen)
+			else:
+				arg = first_int
+				decoded_args.append(arg)
+		return decoded_args
+
+	def enqueue_in_messages(self, data):
+		offset = 0
+		while offset < len(data):
+			object_id, size_opcode = struct.unpack(
+				"=II",
+				data[offset:offset + 8]
+			)
+			size = size_opcode >> 16
+			opcode = size_opcode & 0xffff
+			args = data[offset + 8:offset + size]
+			print(
+				f"S -> C: {data[offset:offset + size].hex()}",
+				flush=True
+			)
+			offset += size
+			listener = self.listeners[(object_id << 4) | opcode]
+			if not listener:
+				continue
+			callback, arg_types = listener
+			decoded_args = self.decode_args(args, arg_types)
+			self.in_queue.append(
+				(object_id, callback, decoded_args)
+			)
 
 	def connect(self):
-		# https://wayland-book.com/protocol-design/wire-protocol.html#transports
-		# we do not check WAYLAND_SOCKET since this client is not intended to be
-		# used as a subclient
+		# https://wayland-book.com/protocol-design/wire-protocol.html
+		# #transports
+		# we do not check WAYLAND_SOCKET since this client is not 
+		# intended to be used as a subclient
 		runtime_dir = os.environ["XDG_RUNTIME_DIR"]
 
 		if not runtime_dir:
@@ -643,455 +358,356 @@ class WlDisplay:
 		
 		display = os.environ.get("WAYLAND_DISPLAY", "wayland-0")
 		path = os.path.join(runtime_dir, display)
-		self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-		self.socket.connect(path)
+		sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		sock.connect(path)
+		self.sock = sock
 
-	def pad4(self, data):
-		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
-		remainder = len(data) % 4
-		return (4 - remainder) % 4
-
-	def encode_arg(self, arg):
-		if isinstance(arg, int):
-			return struct.pack("=I", arg)
-
-		# https://wayland.freedesktop.org/docs/book/Protocol.html#string
-		elif isinstance(arg, str):
-			data = arg.encode("utf-8") + b"\x00"
-			return (
-				struct.pack("=I", len(data))
-				+ data
-				+ b"\x00" * self.pad4(data)
-			)
-
-		elif arg is None:
-			return struct.pack("=I", 0)
-
-	def encode_message(self, msg):
-		encoded_args = b"".join(
-			self.encode_arg(a) for a in msg["params"][2]
-		)
-		message_size = 8 + len(encoded_args)
-		encoded_header = struct.pack(
-			"=II",
-			msg["params"][0],
-			(message_size << 16) | msg["params"][1]
-		)
-		data = encoded_header + encoded_args
-		print(f"C -> S: {data.hex()}", flush=True)
-		return data, msg["aux"]
-
-	def decode_args(self, args, arg_types):
-		offset = 0
-		decoded_args = []
-
-		for arg_type in arg_types:
-			if arg_type is int:
-				decoded_args.append(
-					struct.unpack(
-						"=I",
-						args[offset:offset + 4]
-					)[0]
+	def flush_out_queue(self):
+		while self.out_queue:
+			data, aux, post_request = self.out_queue.popleft()
+			auxdata = [aux] if aux else []
+			num_sent = 0
+			while num_sent < len(data):
+				num_sent += self.sock.sendmsg(
+					[data[num_sent:]],
+					auxdata if num_sent == 0 else []
 				)
-				offset += 4
+			if post_request:
+				func, args = post_request
+				func(*args)
 
-			elif arg_type is str:
-				arg_len = struct.unpack(
-					"=I",
-					args[offset:offset + 4]
-				)[0]
-				offset += 4
-				arg = args[offset:offset + arg_len]
-				decoded_args.append(arg[:-1].decode("utf-8"))
-				offset += arg_len
-				offset += self.pad4(arg)
-
-		return decoded_args
-
-	def decode_messages(self, data):
-		offset = 0
-		
-		while offset < len(data):
-			object_id, size_opcode = struct.unpack(
-				"=II",
-				data[offset:offset + 8]
-			)
-			size = size_opcode >> 16
-			opcode = size_opcode & 0xFFFF
-			args = data[offset + 8: offset + size]
-			print(f"S -> C: {data[offset:offset + size].hex()}", flush=True)
-			offset += size
-			lookup = self.callback_lookups[
-				(object_id << 4) | opcode
-			]
-
-			if not lookup:
-				print(f"Ignoring object_id: {object_id}, size: {size}, opcode: {opcode}, args: {args}", flush=True)
-				continue
-			
-			decoded_args = self.decode_args(args, lookup[1])
-			self.in_messages.append((lookup[0], decoded_args))
+	def fill_in_queue(self):
+		data = os.read(self.sock.fileno(), 4096)
+		if data == b"":
+			raise ConnectionError("Compositor closed connection")
+		self.enqueue_in_messages(data)
 
 	def dispatch(self):
-		while self.in_messages:
-			callback, args = self.in_messages.popleft()
-			callback(*args)
+		while self.in_queue:
+			object_id, callback, args = self.in_queue.popleft()
+			callback(self, object_id, *args)
 
-	def register_event(self, object_id, opcode, arg_types, callback):
-		self.callback_lookups[(object_id << 4) | opcode] = (
-			callback,
-			arg_types
-		)
+	def work_tasks(self):
+		while self.task_queue:
+			task, args = self.task_queue.popleft()
+			task(self, *args)
 
-	def schedule_request(self, object_id, opcode, *args, aux=()):
-		msg = {
-			"params": (object_id, opcode, args),
-			"aux": aux
-		}
-		self.out_messages.append(msg)
-
-	def on_event_error(self, object_id, code, message):
-		raise Exception(
-			f"Error: Object {object_id}, code {code}, msg {message}"
-		)
-
-	def register_event_error(self):
-		opcode = 0
-		arg_types = (int, int, str)
-		self.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.on_event_error
-		)
-
-	def on_event_delete_id(self, id):
-		del_key = None
-
-		for k, v in self.objects.items():
-			if v.object_id == id:
-				del_key = k
-
-		del self.objects[del_key]
-		self.released_object_ids.append(id)
-		print(f"Released object_id: {id}")
-
-	def register_event_delete_id(self):
-		opcode = 1
-		arg_types = (int,)
-		self.register_event(
-			self.object_id,
-			opcode,
-			arg_types,
-			self.on_event_delete_id
-		)
-
-	def schedule_request_sync(self, new_id):
-		opcode = 0
-		self.schedule_request(
-			self.object_id,
-			opcode,
-			new_id
-		)
-		
-	def schedule_request_get_registry(self, new_id):
-		opcode = 1
-		self.schedule_request(self.object_id, opcode, new_id)
-
-	def schedule_task(self, task):
-		self.tasks.append(task)
-
-	def run_event_loop(self, step):
+	def loop(self, sleep_callback):
 		while True:
-			if self.tasks:
-				task = self.tasks.popleft()
-				task()
-
-			skip_read = step()
-
-			if self.out_messages:
-				while self.out_messages:
-					msg = self.out_messages.popleft()
-					data, aux = self.encode_message(msg)
-					num_bytes = 0
-					auxdata = [aux] if aux else []
-
-					while num_bytes < len(data):
-						num_bytes += (
-							self.socket.sendmsg(
-								[data[num_bytes:]],
-								auxdata
-							)
-						)
-
-			if skip_read:
-				continue
-
+			if self.task_queue:
+				self.work_tasks()
+			if self.out_queue:
+				self.flush_out_queue()
 			rlist, _, _ = select.select(
-				[self.socket.fileno()],
+				[self.sock.fileno(), self.sleep_fd],
 				[],
 				[]
 			)
-			
-			if rlist:
-				data = os.read(self.socket.fileno(), 4096)
-
-				if data == b"":
-					raise Exception("Server closed connection")
-
-				self.decode_messages(data)
+			if self.sock.fileno() in rlist:
+				self.fill_in_queue()
 				self.dispatch()
+			elif self.sleep_fd in rlist:
+				sleep_callback(self)
 
 
-class Client:
-	class State(Enum):
-		CREATE_GLOBALS = 1
-		HANDLE_OUTPUTS = 2
-		FIRST_SURFACE_COMMIT = 3
-		SET_SHM_POOL = 4
-		SET_BUFFER = 5
-		SET_FIRST_RENDER = 6
+# ------------------------------------------------------------------------------
+# OUTPUT HANDLING
+# ------------------------------------------------------------------------------
+def destroy_shared_memory(buf, buf_fd):
+	print(f"Destroy shared memory: {buf_fd}", flush=True)
+	os.close(buf_fd)
+	buf.close()
 
-	def __init__(self, display):
-		self.state = self.State.CREATE_GLOBALS
-		self.display = display
-		self.outputs = deque()
 
-	def setup_base_interfaces(self):
-		self.display.register_event_error()
-		self.display.register_event_delete_id()
-		self.display.connect()
-		self.display.objects["wl_registry"] = WlRegistry(self.display)
-		self.display.objects["wl_registry"].register_event_global()
-		self.display.schedule_request_get_registry(
-			self.display.objects["wl_registry"].object_id
+def draw_image(path, width, height):
+	image = Image.open(path).convert("RGB")
+	scale = max(
+		width / image.width,
+		height / image.height
+	)
+	new_width = round(image.width * scale)
+	new_height = round(image.height * scale)
+	image = image.resize(
+		(new_width, new_height),
+		Image.Resampling.LANCZOS
+	)
+	left = (new_width - width) // 2
+	top = (new_height - height) // 2
+	image = image.crop((
+		left,
+		top,
+		left + width,
+		top + height
+	))
+	return image.tobytes("raw", "BGRX")
+
+
+def render_output(wl_connection, output):
+	print(f"Output: Start render", flush=True)
+	output.render_pending = False
+	buffer_width = output.width * output.preferred_buffer_scale
+	buffer_height = output.height * output.preferred_buffer_scale
+	buffer_stride = buffer_width * 4
+	buffer_size = buffer_stride * buffer_height
+	buf_fd = os.memfd_create("bg_frame_buffer")
+	os.ftruncate(buf_fd, buffer_size)
+	buf = mmap.mmap(
+		buf_fd,
+		buffer_size,
+		flags=mmap.MAP_SHARED,
+		prot=mmap.PROT_READ | mmap.PROT_WRITE,
+	)
+	shm_pool = wl_connection.create_object(WaylandShmPool)
+	print(f"Output: Create wl_shm_pool {shm_pool.object_id}", flush=True)
+	wl_connection.enqueue_out_message(
+		wl_connection.shm.create_pool(
+			shm_pool.object_id,
+			buf_fd,
+			buffer_size
 		)
-		self.display.objects["wl_callback_registry"] = WlCallback(
-			self.display
+	)
+	wl_buf = wl_connection.create_object(WaylandBuffer)
+	print(f"Output: Create wl_buffer {wl_buf.object_id}", flush=True)
+	wl_connection.enqueue_out_message(
+		shm_pool.create_buffer(
+			wl_buf.object_id,
+			0,
+			buffer_width,
+			buffer_height,
+			buffer_stride,
+			1
 		)
-		self.display.objects["wl_callback_registry"].register_event_done(
-			self.display.objects["wl_registry"].on_event_done
+	)
+	if output.bg_is_image:
+		buf[:] = draw_image(
+			output.backgrounds[0],
+			buffer_width,
+			buffer_height
 		)
-		self.display.schedule_request_sync(
-			self.display.objects["wl_callback_registry"].object_id
+	else:
+		buf[:] = output.backgrounds[0] * (buffer_width * buffer_height)
+	wl_connection.enqueue_out_message(
+		output.surface.set_buffer_scale(output.preferred_buffer_scale)
+	)
+	wl_connection.enqueue_out_message(
+		output.surface.attach(wl_buf.object_id, 0, 0)
+	)
+	wl_connection.enqueue_out_message(
+		output.surface.damage(0, 0, output.width, output.height)
+	)
+	wl_connection.enqueue_out_message(output.surface.commit())
+	wl_connection.enqueue_out_message(wl_buf.destroy())
+	wl_connection.enqueue_out_message(
+		shm_pool.destroy(),
+		post_request=(destroy_shared_memory, (buf, buf_fd))
+	)
+	wl_connection.destroy_object(shm_pool.object_id)
+	wl_connection.destroy_object(wl_buf.object_id)
+
+
+def handle_new_output(wl_connection, output):
+	output.backgrounds = wl_connection.backgrounds
+	output.bg_is_image = wl_connection.bg_is_image
+	output.surface = wl_connection.create_object(WaylandSurface)
+	wl_connection.listen(
+		output.surface.preferred_buffer_scale(),
+		on_scale
+	)
+	wl_connection.enqueue_out_message(
+		wl_connection.compositor.create_surface(
+			output.surface.object_id
 		)
-		print(f"WlCallback created {self.display.objects["wl_callback_registry"].object_id}", flush=True)
-		print(f"WlRegistry created {self.display.objects["wl_registry"].object_id}", flush=True)
-		print(f"Objects: {self.display.objects}", flush=True)
-		
-	def run(self):
-		if self.state == self.State.CREATE_GLOBALS:
-			print(f"Objects: {self.display.objects}", flush=True)
-			for _ in range(len(self.display.objects["wl_registry"].global_events)):
-				iface, name, version = (
-					self.display.objects["wl_registry"].global_events.popleft()
-				)
+	)
+	print(f"Output: Create surface {output.surface.object_id}", flush=True)
+	output.layer_surface = (
+		wl_connection.create_object(ZwlrLayerSurfaceV1)
+	)
+	wl_connection.listen(
+		output.layer_surface.configure(),
+		on_configure
+	)
+	wl_connection.listen(
+		output.layer_surface.closed(),
+		on_closed
+	)
+	wl_connection.enqueue_out_message(
+		wl_connection.layer_shell.get_layer_surface(
+			output.layer_surface.object_id,
+			output.surface.object_id,
+			output.wl_output.object_id,
+			0,
+			"bg_wallpaper"
+		)
+	)
+	print(
+		f"Output: Create layer surface"
+		+ f" {output.layer_surface.object_id}",
+		flush=True
+	)
+	wl_connection.enqueue_out_message(
+		output.layer_surface.set_size(0, 0)
+	)
+	wl_connection.enqueue_out_message(
+		output.layer_surface.set_anchor(1 | 2 | 4 | 8)
+	)
+	wl_connection.enqueue_out_message(output.surface.commit())
 
-				if iface == "wl_compositor":
-					self.display.objects["wl_compositor"] = WlCompositor(
-						self.display
-					)
-					self.display.objects["wl_registry"].schedule_request_bind(
-						name,
-						iface,
-						version,
-						self.display.objects["wl_compositor"].object_id
-					)
-					print(f"WlCompositor created {self.display.objects["wl_compositor"].object_id}", flush=True)
 
-				elif iface == "zwlr_layer_shell_v1":
-					self.display.objects["zwlr_layer_shell_v1"] = ZwlrLayerShellV1(
-						self.display
-					)
-					self.display.objects["wl_registry"].schedule_request_bind(
-						name,
-						iface,
-						version,
-						self.display.objects["zwlr_layer_shell_v1"].object_id
-					)
-					print(f"ZwlrLayerShellV1 created {self.display.objects["zwlr_layer_shell_v1"].object_id}", flush=True)
+# ------------------------------------------------------------------------------
+# ROUTING AND EVENT HANDLING
+# ------------------------------------------------------------------------------
+def on_closed(wl_connection, ref_object_id):
+	print(f"Closed: {ref_object_id}", flush=True)
 
-				elif iface == "wl_shm":
-					self.display.objects["wl_shm"] = WlShm(
-						self.display
-					)
-					self.display.objects["wl_registry"].schedule_request_bind(
-						name,
-						iface,
-						version,
-						self.display.objects["wl_shm"].object_id
-					)
-					print(f"Shm created {self.display.objects["wl_shm"].object_id}", flush=True)
 
-			if self.display.objects["wl_registry"].done:
-				self.state = self.State.HANDLE_OUTPUTS
+def on_configure(wl_connection, ref_object_id, serial, width, height):
+	print(f"Configure: {serial} {width} {height}", flush=True)
+	output = None
+	for outp in wl_connection.outputs:
+		if outp.layer_surface.object_id == ref_object_id:
+			output = outp
+			break
+	output.width = width
+	output.height = height
+	output.configure_serial = serial
+	wl_connection.enqueue_out_message(
+		output.layer_surface.ack_configure(serial)
+	)
+	if not output.render_pending:
+		output.render_pending = True
+		wl_connection.task_queue.append(
+			(render_output, (output,))
+		)
 
-			return False
 
-		elif self.state == self.State.HANDLE_OUTPUTS:
-			# destroy removed outputs
-			for _ in range(len(self.display.objects["wl_registry"].global_remove_events)):
-				name = (
-					self.display.objects["wl_registry"].global_remove_events
-					.popleft()
-				)
-				removed_output = None
+def on_scale(wl_connection, ref_object_id, scale):
+	output = None
+	for outp in wl_connection.outputs:
+		if outp.surface.object_id == ref_object_id:
+			output = outp
+			break
+	output.preferred_buffer_scale = scale
+	if not output.render_pending:
+		output.render_pending = True
+		wl_connection.task_queue.append(
+			(render_output, (output,))
+		)
+	print(f"Preferred buffer scale: {scale}", flush=True)
 
-				for output in self.outputs:
-					if output.name == name:
-						removed_output = output
-						break
-				if removed_output:
-					self.outputs.remove(removed_output)
-				# TODO: whatever else needs to be done to destroy
-				# surfaces, buffers etc?
 
-			# create new outputs
-			for _ in range(len(self.display.objects["wl_registry"].output_events)):
-				iface, name, version = (
-					self.display.objects["wl_registry"].output_events.popleft()
-				)
-				output = WlOutput(self.display, name)
-				self.outputs.append(output)
-				self.display.objects["wl_registry"].schedule_request_bind(
-					name,
-					iface,
-					version,
-					output.object_id
-				)
+def on_error(wl_connection, ref_object_id, object_id, code, message):
+	print(f"Error: {code}: {object_id} {message}", flush=True)
 
-			self.display.objects["wl_surface"] = WlSurface(self.display)
-			self.display.objects["wl_compositor"].schedule_request_create_surface(
-				self.display.objects["wl_surface"].object_id
+
+def on_delete(wl_connection, ref_object_id, id):
+	print(f"Delete: {id}", flush=True)
+	wl_connection.destroy_object(id)
+
+
+def on_global(wl_connection, ref_object_id, name, interface, version):
+	wl_object = None
+	if interface == "wl_compositor":
+		wl_object = wl_connection.create_object(WaylandCompositor)
+		wl_connection.compositor = wl_object
+	elif interface == "wl_shm":
+		wl_object = wl_connection.create_object(WaylandShm)
+		wl_connection.shm = wl_object
+	elif interface == "wl_output":
+		wl_object = wl_connection.create_object(WaylandOutput)
+		wl_connection.outputs.append(Output(wl_object, name))
+		if wl_connection.bound_globals:
+			handle_new_output(
+				wl_connection,
+				wl_connection.outputs[-1]
 			)
-			print(f"WlSurface created {self.display.objects["wl_surface"].object_id}", flush=True)
-
-			self.display.objects["zwlr_layer_surface_v1"] = ZwlrLayerSurfaceV1(self.display)
-			self.display.objects["zwlr_layer_shell_v1"].schedule_request_get_layer_surface(
-				self.display.objects["zwlr_layer_surface_v1"].object_id,
-				self.display.objects["wl_surface"].object_id,
-				None,
-				0,
-				"wallpaper"
+	elif interface == "zwlr_layer_shell_v1":
+		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
+		wl_connection.layer_shell = wl_object
+	if wl_object:
+		print(
+			f"Global: {name} {interface} {version}"
+			+ f" bound {wl_object.object_id}",
+			flush=True
+		)
+		wl_connection.enqueue_out_message(
+			wl_connection.registry.bind(
+				name,
+				interface,
+				version,
+				wl_object.object_id
 			)
-			print(f"LayerSurface created {self.display.objects["zwlr_layer_surface_v1"].object_id}", flush=True)
+		)
 
-			self.display.objects["zwlr_layer_surface_v1"].register_event_configure()
-			self.display.objects["zwlr_layer_surface_v1"].schedule_request_set_size(
-				0,
-				0
-			)
-			self.display.objects["zwlr_layer_surface_v1"].schedule_request_set_anchor(
-				self.display.objects["zwlr_layer_surface_v1"].Anchor.TOP
-				| self.display.objects["zwlr_layer_surface_v1"].Anchor.BOTTOM
-				| self.display.objects["zwlr_layer_surface_v1"].Anchor.LEFT
-				| self.display.objects["zwlr_layer_surface_v1"].Anchor.RIGHT
-			)
-			self.display.objects["wl_surface"].schedule_request_commit()
-			self.state = self.State.FIRST_SURFACE_COMMIT
-			print(f"Commited surface", flush=True)
-			return False
-		
-		elif self.state == self.State.FIRST_SURFACE_COMMIT:
-			if not self.display.objects["zwlr_layer_surface_v1"].configured:
-				return False
-			
-			self.display.objects["zwlr_layer_surface_v1"].configured = False
-			self.display.objects["zwlr_layer_surface_v1"].reqister_request_ack_configure(
-				self.display.objects["zwlr_layer_surface_v1"].serial
-			)
-			print("Acked configure", flush=True)
 
-			self.display.objects["wl_shm_pool"] = WlShmPool(self.display)
-			self.display.objects["wl_shm_pool"].create_shared_frame_buffer(
-				self.display.objects["zwlr_layer_surface_v1"].size
-			)
-			self.display.objects["wl_shm"].schedule_request_create_pool(
-				self.display.objects["wl_shm_pool"].object_id,
-				self.display.objects["wl_shm_pool"].buf_fd,
-				self.display.objects["zwlr_layer_surface_v1"].size,
-			)
-			self.state = self.State.SET_SHM_POOL
-			print(f"Shm pool with frame buffer created {self.display.objects["wl_shm_pool"].object_id}", flush=True)
-			return True
+def on_done(wl_connection, ref_object_id, callback_data):
+	print(f"Done: {callback_data}", flush=True)
+	wl_connection.bound_globals = True
+	for output in wl_connection.outputs:
+		handle_new_output(wl_connection, output)
 
-		elif self.state == self.State.SET_SHM_POOL:
-			self.display.objects["wl_buffer"] = WlBuffer(self.display)
-			self.display.objects["wl_shm_pool"].schedule_request_create_buffer(
-				self.display.objects["wl_buffer"].object_id,
-				0,
-				self.display.objects["zwlr_layer_surface_v1"].width,
-				self.display.objects["zwlr_layer_surface_v1"].height,
-				self.display.objects["zwlr_layer_surface_v1"].stride,
-				self.display.objects["wl_shm"].format
-			)
 
-			def resize_cover(path, width, height):
-				image = Image.open(path).convert("RGB")
+def event_sleep(duration):
+	rfd, wfd = os.pipe()
+	pid = os.fork()
+	if pid < 0:
+		raise Exception("Event sleep fork")
+	if pid == 0:
+		for i in range(3, 11):
+			if i == wfd:
+				continue
+			try:
+				os.close(i)
+			except OSError:
+				pass
+		time.sleep(duration)
+		os.write(wfd, b"wakey")
+		os.close(wfd)
+		os._exit(0)
+	os.close(wfd)
+	return rfd
 
-				scale = max(
-					width / image.width,
-					height / image.height
-				)
 
-				new_width = round(image.width * scale)
-				new_height = round(image.height * scale)
+def on_wakey(wl_connection):
+	os.close(wl_connection.sleep_fd)
+	wl_connection.sleep_fd = event_sleep(60)
+	for output in wl_connection.outputs:
+		print(f"Wakey: {output.wl_output.object_id}", flush=True)
+		bg = output.backgrounds.popleft()
+		output.backgrounds.append(bg)
+		render_output(wl_connection, output)
 
-				image = image.resize(
-					(new_width, new_height),
-					Image.Resampling.LANCZOS
-				)
 
-				left = (new_width - width) // 2
-				top = (new_height - height) // 2
-
-				return image.crop((
-					left,
-					top,
-					left + width,
-					top + height
-				))
-
-			users = [
-				p for p in Path("/home").iterdir() if p.is_dir()
-			]
-			user = users[0].name
-			image = resize_cover(
-				f"/home/{user}/wall1.jpg",
-				self.display.objects["zwlr_layer_surface_v1"].width,
-				self.display.objects["zwlr_layer_surface_v1"].height
-			)
-
-			image_bytes_xrgb = image.tobytes("raw", "BGRX")
-			self.display.objects["wl_shm_pool"].buf[:] = image_bytes_xrgb
-			self.display.objects["wl_surface"].schedule_request_attach(
-				self.display.objects["wl_buffer"].object_id,
-				0,
-				0
-			)
-			self.display.objects["wl_surface"].schedule_request_commit()
-			self.state = self.State.SET_BUFFER
-			print(f"Buffer created and attached {self.display.objects["wl_buffer"].object_id}", flush=True)
-			return False
-
-		elif self.state == self.State.SET_BUFFER:
-			if not self.display.objects["zwlr_layer_surface_v1"].configured:
-				return False
-
-			self.display.objects["zwlr_layer_surface_v1"].configured = False
-			self.display.objects["zwlr_layer_surface_v1"].reqister_request_ack_configure(
-				self.display.objects["zwlr_layer_surface_v1"].serial
-			)
-			self.state = self.State.SET_FIRST_RENDER
-			print("Acked configure", flush=True)
-			return False
-			
-
+# ------------------------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------------------------
 def main():
-	wl_display = WlDisplay()
-	client = Client(wl_display)
-	wl_display.schedule_task(client.setup_base_interfaces)
-	wl_display.run_event_loop(client.run)
+	wl_connection = WaylandConnection()
+	jpgs = [
+		p for p in (Path.home() / "images").rglob("*")
+		if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg"}
+	]
+	if jpgs:
+		wl_connection.bg_is_image = True
+		wl_connection.backgrounds = deque(jpgs)
+	wl_connection.connect()
+	wl_display = wl_connection.create_object(WaylandDisplay)
+	wl_connection.display = wl_display
+	wl_connection.listen(wl_display.error(), on_error)
+	wl_connection.listen(wl_display.delete_id(), on_delete)
+	wl_registry = wl_connection.create_object(WaylandRegistry)
+	wl_connection.registry = wl_registry
+	wl_connection.listen(wl_registry.global_(), on_global)
+	wl_connection.enqueue_out_message(
+		wl_display.get_registry(wl_registry.object_id)
+	)
+	wl_callback = wl_connection.create_object(WaylandCallback)
+	wl_connection.callback = wl_callback
+	wl_connection.listen(wl_callback.done(), on_done)
+	wl_connection.enqueue_out_message(
+		wl_display.sync(wl_callback.object_id)
+	)
+	wl_connection.sleep_fd = event_sleep(60)
+	wl_connection.loop(on_wakey)
 
 
 if __name__ == "__main__":
