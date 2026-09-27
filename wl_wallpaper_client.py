@@ -219,7 +219,6 @@ class WaylandConnection:
 		self.outputs = []
 		self.out_queue = deque()
 		self.in_queue = deque()
-		self.task_queue = deque()
 		self.sleep_fd = -1
 		self.backgrounds = deque(
 			[b"\xff\xff\xff\x00", b"\x00\x00\x00\x00" ]
@@ -387,15 +386,8 @@ class WaylandConnection:
 			object_id, callback, args = self.in_queue.popleft()
 			callback(self, object_id, *args)
 
-	def work_tasks(self):
-		while self.task_queue:
-			task, args = self.task_queue.popleft()
-			task(self, *args)
-
-	def loop(self, sleep_callback):
+	def loop(self, sleep_callback, render_callback):
 		while True:
-			if self.task_queue:
-				self.work_tasks()
 			if self.out_queue:
 				self.flush_out_queue()
 			rlist, _, _ = select.select(
@@ -408,6 +400,9 @@ class WaylandConnection:
 				self.dispatch()
 			elif self.sleep_fd in rlist:
 				sleep_callback(self)
+			for output in self.outputs:
+				if output.render_pending:
+					render_callback(self, output)
 
 
 # ------------------------------------------------------------------------------
@@ -573,11 +568,7 @@ def on_configure(wl_connection, ref_object_id, serial, width, height):
 	wl_connection.enqueue_out_message(
 		output.layer_surface.ack_configure(serial)
 	)
-	if not output.render_pending:
-		output.render_pending = True
-		wl_connection.task_queue.append(
-			(render_output, (output,))
-		)
+	output.render_pending = True
 
 
 def on_scale(wl_connection, ref_object_id, scale):
@@ -587,11 +578,7 @@ def on_scale(wl_connection, ref_object_id, scale):
 			output = outp
 			break
 	output.preferred_buffer_scale = scale
-	if not output.render_pending:
-		output.render_pending = True
-		wl_connection.task_queue.append(
-			(render_output, (output,))
-		)
+	output.render_pending = True
 	print(f"Preferred buffer scale: {scale}", flush=True)
 
 
@@ -674,7 +661,7 @@ def on_wakey(wl_connection):
 		print(f"Wakey: {output.wl_output.object_id}", flush=True)
 		bg = output.backgrounds.popleft()
 		output.backgrounds.append(bg)
-		render_output(wl_connection, output)
+		output.render_pending = True
 
 
 # ------------------------------------------------------------------------------
@@ -707,7 +694,7 @@ def main():
 		wl_display.sync(wl_callback.object_id)
 	)
 	wl_connection.sleep_fd = event_sleep(60)
-	wl_connection.loop(on_wakey)
+	wl_connection.loop(on_wakey, render_output)
 
 
 if __name__ == "__main__":
