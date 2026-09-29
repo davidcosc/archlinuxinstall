@@ -225,38 +225,18 @@ class WaylandConnection:
 		)
 		self.bg_is_image = False
 
-	def create_object(self, interface):
+	def alloc_id(self):
 		if self.released_object_ids:
-			object_id = self.released_object_ids.popleft()
-		else:
-			self.next_object_id += 1
-			object_id = self.next_object_id
-			if object_id > 0xfeffffff:
-				raise RuntimeError("Ran out of object ids")
-		return interface(object_id)
+			return self.released_object_ids.popleft()
+		self.next_object_id += 1
+		if self.next_object_id > 0xfeffffff:
+			raise RuntimeError("Ran out of object ids")
+		return self.next_object_id
 
-	def destroy_object(self, object_id):
+	def free_id(self, object_id):
+		# This will only affect ids 3 and above since there are no
+		# destructors or delete id events for wl_display and wl_registry
 		self.released_object_ids.append(object_id)
-		for i in range(16):
-			self.listeners[(object_id << 4) | i] = None
-		for attr in (
-			"display",
-			"registry",
-			"compositor",
-			"callback",
-			"shm",
-			"layer_shell"
-		):
-			obj = getattr(self, attr)
-			if obj and obj.object_id == object_id:
-				setattr(self, attr, None)
-				return object_id
-		for output in self.outputs:
-			for attr in ("wl_output", "surface", "layer_surface"):
-				obj = getattr(output, attr)
-				if obj and obj.object_id == object_id:
-					setattr(output, attr, None)
-					return object_id
 		return object_id
 		
 	def listen(self, event, callback):
@@ -264,6 +244,11 @@ class WaylandConnection:
 		index = (object_id << 4) | opcode
 		self.listeners[index] = (callback, arg_types)
 		return index
+
+	def destroy_listener(self, object_id):
+		base = (object_id << 4)
+		for opcode in range(16):
+			self.listeners[base | opcode] = None
 
 	def pad4(self, n):
 		return (4 - (n % 4)) % 4
@@ -452,7 +437,7 @@ def render_output(wl_connection, output):
 		flags=mmap.MAP_SHARED,
 		prot=mmap.PROT_READ | mmap.PROT_WRITE,
 	)
-	shm_pool = wl_connection.create_object(WaylandShmPool)
+	shm_pool = WaylandShmPool(wl_connection.alloc_id())
 	print(f"Output: Create wl_shm_pool {shm_pool.object_id}", flush=True)
 	wl_connection.enqueue_out_message(
 		wl_connection.shm.create_pool(
@@ -461,7 +446,7 @@ def render_output(wl_connection, output):
 			buffer_size
 		)
 	)
-	wl_buf = wl_connection.create_object(WaylandBuffer)
+	wl_buf = WaylandBuffer(wl_connection.alloc_id())
 	print(f"Output: Create wl_buffer {wl_buf.object_id}", flush=True)
 	wl_connection.enqueue_out_message(
 		shm_pool.create_buffer(
@@ -496,14 +481,14 @@ def render_output(wl_connection, output):
 		shm_pool.destroy(),
 		post_request=(destroy_shared_memory, (buf, buf_fd))
 	)
-	wl_connection.destroy_object(shm_pool.object_id)
-	wl_connection.destroy_object(wl_buf.object_id)
+	wl_connection.free_id(shm_pool.object_id)
+	wl_connection.free_id(wl_buf.object_id)
 
 
 def handle_new_output(wl_connection, output):
 	output.backgrounds = wl_connection.backgrounds
 	output.bg_is_image = wl_connection.bg_is_image
-	output.surface = wl_connection.create_object(WaylandSurface)
+	output.surface = WaylandSurface(wl_connection.alloc_id())
 	wl_connection.listen(
 		output.surface.preferred_buffer_scale(),
 		on_scale
@@ -515,7 +500,7 @@ def handle_new_output(wl_connection, output):
 	)
 	print(f"Output: Create surface {output.surface.object_id}", flush=True)
 	output.layer_surface = (
-		wl_connection.create_object(ZwlrLayerSurfaceV1)
+		ZwlrLayerSurfaceV1(wl_connection.alloc_id())
 	)
 	wl_connection.listen(
 		output.layer_surface.configure(),
@@ -586,21 +571,21 @@ def on_error(wl_connection, ref_object_id, object_id, code, message):
 	print(f"Error: {code}: {object_id} {message}", flush=True)
 
 
-def on_delete(wl_connection, ref_object_id, id):
+def on_delete_id(wl_connection, ref_object_id, id):
 	print(f"Delete: {id}", flush=True)
-	wl_connection.destroy_object(id)
+	wl_connection.free_id(id)
 
 
 def on_global(wl_connection, ref_object_id, name, interface, version):
 	wl_object = None
 	if interface == "wl_compositor":
-		wl_object = wl_connection.create_object(WaylandCompositor)
+		wl_object = WaylandCompositor(wl_connection.alloc_id())
 		wl_connection.compositor = wl_object
 	elif interface == "wl_shm":
-		wl_object = wl_connection.create_object(WaylandShm)
+		wl_object = WaylandShm(wl_connection.alloc_id())
 		wl_connection.shm = wl_object
 	elif interface == "wl_output":
-		wl_object = wl_connection.create_object(WaylandOutput)
+		wl_object = WaylandOutput(wl_connection.alloc_id())
 		wl_connection.outputs.append(Output(wl_object, name))
 		if wl_connection.bound_globals:
 			handle_new_output(
@@ -608,7 +593,7 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 				wl_connection.outputs[-1]
 			)
 	elif interface == "zwlr_layer_shell_v1":
-		wl_object = wl_connection.create_object(ZwlrLayerShellV1)
+		wl_object = ZwlrLayerShellV1(wl_connection.alloc_id())
 		wl_connection.layer_shell = wl_object
 	if wl_object:
 		print(
@@ -628,6 +613,10 @@ def on_global(wl_connection, ref_object_id, name, interface, version):
 
 def on_done(wl_connection, ref_object_id, callback_data):
 	print(f"Done: {callback_data}", flush=True)
+	print(wl_connection.listeners, flush=True)
+	wl_connection.destroy_listener(ref_object_id)
+	print(wl_connection.listeners, flush=True)
+	wl_connection.callback = None
 	wl_connection.bound_globals = True
 	for output in wl_connection.outputs:
 		handle_new_output(wl_connection, output)
@@ -677,17 +666,17 @@ def main():
 		wl_connection.bg_is_image = True
 		wl_connection.backgrounds = deque(jpgs)
 	wl_connection.connect()
-	wl_display = wl_connection.create_object(WaylandDisplay)
+	wl_display = WaylandDisplay(wl_connection.alloc_id())
 	wl_connection.display = wl_display
 	wl_connection.listen(wl_display.error(), on_error)
-	wl_connection.listen(wl_display.delete_id(), on_delete)
-	wl_registry = wl_connection.create_object(WaylandRegistry)
+	wl_connection.listen(wl_display.delete_id(), on_delete_id)
+	wl_registry = WaylandRegistry(wl_connection.alloc_id())
 	wl_connection.registry = wl_registry
 	wl_connection.listen(wl_registry.global_(), on_global)
 	wl_connection.enqueue_out_message(
 		wl_display.get_registry(wl_registry.object_id)
 	)
-	wl_callback = wl_connection.create_object(WaylandCallback)
+	wl_callback = WaylandCallback(wl_connection.alloc_id())
 	wl_connection.callback = wl_callback
 	wl_connection.listen(wl_callback.done(), on_done)
 	wl_connection.enqueue_out_message(
